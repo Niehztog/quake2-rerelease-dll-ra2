@@ -126,6 +126,9 @@ void G_PrintActivationMessage(edict_t *ent, edict_t *activator, bool coop_global
 	{
 		if (coop_global && coop->integer)
 			gi.LocBroadcast_Print(PRINT_CENTER, "{}", ent->message);
+		else if (ra2->integer)
+			// RA2 -- routes through any active RA2 info-message menu first
+			menu_centerprint(activator, ent->message);
 		else
 			gi.LocCenter_Print(activator, "{}", ent->message);
 
@@ -502,7 +505,12 @@ of ent.
 
 BoxEdictsResult_t KillBox_BoxFilter(edict_t *hit, void *)
 {
-	if (!hit->solid || !hit->takedamage || hit->solid == SOLID_TRIGGER)
+	if (!hit->solid || hit->solid == SOLID_TRIGGER)
+		return BoxEdictsResult_t::Skip;
+	// RA2 -- a mid-respawn client (solid, but not yet takedamage) still
+	// needs to reach the shove-apart check below instead of being filtered
+	// out here, so it can be re-resolved by check_telefrag() shortly after.
+	if (!hit->takedamage && !(ra2->integer && hit->client))
 		return BoxEdictsResult_t::Skip;
 
 	return BoxEdictsResult_t::Keep;
@@ -510,6 +518,20 @@ BoxEdictsResult_t KillBox_BoxFilter(edict_t *hit, void *)
 
 bool KillBox(edict_t *ent, bool from_spawning, mod_id_t mod, bool bsp_clipping)
 {
+	// RA2 -- spectating clients are never solid enough to telefrag anyone,
+	// and are never telefragged themselves. This opens the function, ahead of
+	// the early-out below, because check_telefrag() reads the deferred-telefrag
+	// deadline back: RA2's KillBox clears it on entry and re-arms it only where
+	// it shoves, so a path that returns without clearing would leave the client
+	// rechecked forever.
+	if (ra2->integer && ent->client)
+	{
+		ent->client->resp.spawn_recheck = 0_ms;
+
+		if (ent->client->resp.fightstate == FIGHT_SPECTATING)
+			return true;
+	}
+
 	// don't telefrag as spectator...
 	if (ent->movetype == MOVETYPE_NOCLIP)
 		return true;
@@ -532,6 +554,26 @@ bool KillBox(edict_t *ent, bool from_spawning, mod_id_t mod, bool bsp_clipping)
 
 		if (hit == ent)
 			continue;
+		// RA2 -- a same-arena client that's mid-respawn (solid, but not
+		// currently takedamage) gets shoved apart instead of telefragged;
+		// check_telefrag() (arena.cpp) re-resolves the overlap shortly after.
+		else if (ra2->integer && hit->inuse && hit->client && hit->solid && !hit->takedamage)
+		{
+			vec3_t angles{ 0, (float) irandom(360), 0 };
+			vec3_t forward;
+			AngleVectors(angles, forward, nullptr, nullptr);
+			forward *= 600.f;
+
+			hit->solid = SOLID_NOT;
+			ent->solid = SOLID_NOT;
+			hit->velocity += forward;
+			ent->velocity += forward;
+
+			hit->client->resp.spawn_recheck = level.time + 500_ms;
+			if (ent->client)
+				ent->client->resp.spawn_recheck = level.time + 500_ms;
+			continue;
+		}
 		else if (!hit->inuse || !hit->takedamage || !hit->solid || hit->solid == SOLID_TRIGGER || hit->solid == SOLID_BSP)
 			continue;
 		else if (hit->client && !(mask & CONTENTS_PLAYER))

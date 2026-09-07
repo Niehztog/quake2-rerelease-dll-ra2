@@ -185,6 +185,7 @@ void SP_info_player_coop_lava(edict_t *self);
 void SP_info_teleport_destination(edict_t *self);
 void SP_trigger_teleport(edict_t *self);
 void SP_trigger_disguise(edict_t *self);
+void SP_func_illusionary(edict_t *self); // RA2
 void SP_monster_stalker(edict_t *self);
 void SP_monster_turret(edict_t *self);
 void SP_target_steam(edict_t *self);
@@ -396,6 +397,7 @@ static const std::initializer_list<spawn_t> spawns = {
 	{ "trigger_teleport", SP_trigger_teleport },
 	{ "trigger_disguise", SP_trigger_disguise },
 	{ "info_teleport_destination", SP_info_teleport_destination },
+	{ "func_illusionary", SP_func_illusionary }, // RA2
 	{ "info_player_coop_lava", SP_info_player_coop_lava },
 	{ "monster_stalker", SP_monster_stalker },
 	{ "monster_turret", SP_monster_turret },
@@ -687,6 +689,7 @@ static const std::initializer_list<field_t> entity_fields = {
 	FIELD_AUTO(combattarget),
 	FIELD_AUTO(message),
 	FIELD_AUTO(team),
+	FIELD_AUTO(arena), // RA2 -- which arena a spawn point/teleporter/trigger belongs to
 	FIELD_AUTO(wait),
 	FIELD_AUTO(delay),
 	FIELD_AUTO(random),
@@ -1066,9 +1069,38 @@ void G_FindTeams()
 	gi.Com_PrintFmt("{} teams with {} entities\n", c, c2);
 }
 
+// RA2 -- arena deathmatch has no PvE content at all: every monster/actor
+// classname and every map health pickup is stubbed out (they're replaced
+// with SP_none in the original, which just frees the edict; we fold that
+// into the generic inhibit check instead of touching the spawn table).
+// Monsters are matched by the "monster_" prefix so this also covers any
+// rogue/xatrix monster classnames merged into this build that RA2's own
+// vanilla-3.20-era stub list never knew about.
+[[nodiscard]] inline bool RA2_IsPveOnlyClassname(const char *classname)
+{
+	if (!classname)
+		return false;
+
+	if (!strncmp(classname, "monster_", 8))
+		return true;
+
+	return !strcmp(classname, "target_actor") ||
+		   !strcmp(classname, "misc_actor") ||
+		   !strcmp(classname, "misc_insane") ||
+		   !strcmp(classname, "item_health") ||
+		   !strcmp(classname, "item_health_small") ||
+		   !strcmp(classname, "item_health_large") ||
+		   !strcmp(classname, "item_health_mega");
+}
+
 // inhibit entities from game based on cvars & spawnflags
 inline bool G_InhibitEntity(edict_t *ent)
 {
+	// RA2
+	if (ra2->integer && RA2_IsPveOnlyClassname(ent->classname))
+		return true;
+	// RA2
+
 	// dm-only
 	if (deathmatch->integer)
 		return ent->spawnflags.has(SPAWNFLAG_NOT_DEATHMATCH);
@@ -1158,6 +1190,20 @@ void SpawnEntities(const char *mapname, const char *entities, const char *spawnp
 		gi.cvar_forceset("skill", G_Fmt("{}", skill_level).data());
 
 	SaveClientData();
+
+	// RA2 -- every menu hangs off TAG_LEVEL, but the queue head that carries it
+	// and the two pointers into it live in game.clients, which is TAG_GAME and
+	// survives the free below. MoveClientToIntermission clear_menus()es them on
+	// the way out of a level, so the ordinary map change arrives here with
+	// nothing left to do -- but a console `map` never runs an intermission, and
+	// after one of those every client would be pointing at nodes that no longer
+	// exist. This has to run *before* the free, not after: a menu's title and
+	// its rows are std::strings living in those TAG_LEVEL blocks, so anything
+	// past the small-string buffer ("---------Continue----------" is 27 bytes)
+	// leaks its heap allocation if the block goes away without the destructor.
+	if (ra2->integer)
+		for (uint32_t i = 0; i < game.maxclients; i++)
+			free_client_menus(&game.clients[i]);
 
 	gi.FreeTags(TAG_LEVEL);
 
@@ -1251,6 +1297,14 @@ void SpawnEntities(const char *mapname, const char *entities, const char *spawnp
 	CTFSpawn();
 	// ZOID
 
+	// RA2
+	if (ra2->integer)
+	{
+		arena_init(g_edicts);
+		GSLogNewmap();
+	}
+	// RA2
+
 	// ROGUE
 	if (deathmatch->integer)
 	{
@@ -1342,6 +1396,32 @@ static void G_InitStatusbar()
 		}
 
 		sb.ifstat(STAT_HEALTH_BARS).yt(24).health_bars().endifstat();
+	}
+	else if (ra2->integer)
+	{
+		// RA2
+		// countdown number + arena status + round info, shown together
+		// while a round is in warmup/countdown
+		sb.ifstat(STAT_RA2_COUNTDOWN)
+			.xv(150).yt(60).num(2, STAT_RA2_COUNTDOWN)
+			.xv(20).yt(50).stat_string(STAT_RA2_ARENASTATUS)
+			.xv(140).yt(40).stat_string(STAT_RA2_ROUNDINFO)
+		.endifstat();
+
+		// the two waiting-queue slots (this client's team position/count)
+		sb.ifstat(STAT_RA2_SHOWQUEUE)
+			.xr(-34).yt(32).num(2, STAT_RA2_QUEUE1)
+			.xr(-34).yt(62).num(2, STAT_RA2_QUEUE2)
+			.xr(-64).yt(40).stat_string(STAT_RA2_QUEUE1_NAME)
+			.xr(-64).yt(70).stat_string(STAT_RA2_QUEUE2_NAME)
+		.endifstat();
+
+		// frags
+		sb.xr(-50).yt(2).num(3, STAT_FRAGS);
+
+		// id view: name of the player an observer is tracking, or the one an
+		// "id" fighter is aiming at
+		sb.ifstat(STAT_RA2_ID_VIEW).xv(0).yb(-58).stat_pname(STAT_RA2_ID_VIEW).endifstat();
 	}
 	else if (G_TeamplayEnabled())
 	{
@@ -1530,11 +1610,27 @@ void SP_worldspawn(edict_t *ent)
 
 	game.airacceleration_modified = sv_airaccelerate->modified_count;
 
+	// RA2 -- precache each team-color skin icon for every player model, so
+	// GetSkinIcon() (arena.cpp) can match a client's current skin against
+	// one of these known team colors and fall back to genericicon otherwise
+	if (ra2->integer)
+	{
+		for (int32_t i = 0; i < MAX_ARENA_SKINS; i++)
+		{
+			teamskins_precachem[i] = gi.imageindex(G_Fmt("male/{}_i", teamskins[i]).data());
+			teamskins_precachef[i] = gi.imageindex(G_Fmt("female/{}_i", teamskins[i]).data());
+			teamskins_precachecw[i] = gi.imageindex(G_Fmt("crakhor/{}_i", teamskins[i]).data());
+			teamskins_precachecb[i] = gi.imageindex(G_Fmt("cyborg/{}_i", teamskins[i]).data());
+		}
+	}
+
 	//---------------
 
 	// help icon for statusbar
 	gi.imageindex("i_help");
 	level.pic_health = gi.imageindex("i_health");
+	if (ra2->integer)
+		genericicon = level.pic_health; // RA2 -- fallback STAT_RA2_SKIN_ICON value
 	gi.imageindex("help");
 	gi.imageindex("field_3");
 
@@ -1563,6 +1659,48 @@ void SP_worldspawn(edict_t *ent)
 
 	gi.soundindex("misc/pc_up.wav");
 	gi.soundindex("misc/talk1.wav");
+
+	// RA2 -- the round loadout. give_ammo() hands all of this out from the
+	// arena's own settings, which have nothing to do with what the map places,
+	// and SpawnItem's ra2 branch only precaches an item the map actually spawns
+	// -- so on a map that places no railgun, the slug icon and the rail model
+	// were still being registered on first use, one configstring at a time,
+	// mid-round. The grapple is the extreme case: it is always owned and never
+	// spawns in the world at all, and CTFPrecache() (which covers it for CTF)
+	// is a branch ra2 skips entirely. Each weapon pulls in its own ammo through
+	// PrecacheItem, the blaster is already precached above, and body armor is
+	// what the arena's armor setting grants.
+	if (ra2->integer)
+	{
+		static constexpr item_id_t ra2_loadout[] = {
+			IT_WEAPON_GRAPPLE, IT_WEAPON_SHOTGUN, IT_WEAPON_SSHOTGUN,
+			IT_WEAPON_MACHINEGUN, IT_WEAPON_CHAINGUN, IT_WEAPON_GLAUNCHER,
+			IT_WEAPON_RLAUNCHER, IT_WEAPON_HYPERBLASTER, IT_WEAPON_RAILGUN,
+			IT_WEAPON_BFG, IT_ARMOR_BODY
+		};
+
+		for (item_id_t id : ra2_loadout)
+			PrecacheItem(GetItemByIndex(id));
+	}
+
+	// RA2 -- the announcer voices. The original mod never precached these: it
+	// stuffed a "play <file>" console command at each client and let the client
+	// load the wav on demand, which the rerelease client never acts on. They go
+	// out as real server sounds now (send_sound_to_arena and show_countdown in
+	// rocketarena2/arena.cpp), so they need an index like any other asset.
+	if (ra2->integer)
+	{
+		gi.soundindex("ra/1.wav");
+		gi.soundindex("ra/2.wav");
+		gi.soundindex("ra/3.wav");
+		gi.soundindex("ra/fight.wav");
+		gi.soundindex("ra/excelent.wav");
+		gi.soundindex("ra/flawless.wav");
+		gi.soundindex("ra/fatality.wav");
+		gi.soundindex("ra/animality.wav");
+		gi.soundindex("ra/outstand.wav");
+		gi.soundindex("ra/welldone.wav");
+	}
 
 	// gibs
 	gi.soundindex("misc/udeath.wav");

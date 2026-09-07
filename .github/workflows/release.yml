@@ -1,0 +1,272 @@
+name: release
+
+# Builds the game module for Windows (MSVC, rerelease/game.sln) and Linux
+# (GCC, Makefile), then assembles a drop-in `arena` gamedir for each: the
+# freshly built module, this repo's gamedir overlay, and the 1999 Rocket Arena
+# 2 release files fetched from the idgames2 mirror. Everything from 1999 goes
+# in except that release's own game modules -- replacing those is the point.
+#
+# A `v*` tag publishes a GitHub release; a manual run leaves the packages as
+# workflow artifacts.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      include_gamedata:
+        description: "Bundle the 1999 RA2 game data (pak0-2.pak and the VWEP skins, ~100 MB)"
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+
+permissions:
+  contents: read
+
+env:
+  # The old PlanetQuake idgames2 archive: the one mirror that still carries the
+  # complete Rocket Arena 2 release history.
+  MIRROR: https://www.gamers.org/pub/idgames2/planetquake/servers/arena
+  SV_ZIP: ra2250sv.zip
+  SV_MD5: 7020cb09c564a9365c2fec1e0842ebee
+  CL_EXE: ra2250cl.exe
+  CL_MD5: 9691b22fce2d1f6a4789155f1f0a6cf5
+
+jobs:
+  windows:
+    name: game_x64.dll
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: microsoft/setup-msbuild@v3
+
+      # fmt and jsoncpp come from vcpkg via rerelease/vcpkg.json; the built
+      # packages cache well and are the bulk of the job's runtime.
+      - name: Cache vcpkg archives
+        uses: actions/cache@v6
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-x64-windows-static-${{ hashFiles('rerelease/vcpkg.json') }}
+
+      - name: Hook vcpkg into MSBuild
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" integrate install
+
+      - name: Build Release|x64
+        run: msbuild rerelease\game.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: game_x64-windows
+          path: |
+            game_x64.dll
+            game_x64.pdb
+          if-no-files-found: error
+
+  linux:
+    name: game_x64.so
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The only dependency: g_save.cpp includes <json/json.h>. fmtlib is not
+      # needed, the Makefile builds as C++20 and uses std::format.
+      - name: Install jsoncpp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libjsoncpp-dev
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      # Catches a build that silently dropped the visibility attribute: an
+      # engine loading this would just report a missing entry point.
+      - name: Check the entry points
+        run: |
+          nm -D --defined-only game_x64.so | grep -qE ' GetGameAPI$'
+          nm -D --defined-only game_x64.so | grep -qE ' GetCGameAPI$'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: game_x64-linux
+          path: game_x64.so
+          if-no-files-found: error
+
+  package:
+    name: release packages
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      INCLUDE_DATA: ${{ inputs.include_gamedata || 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: bin
+
+      - name: Work out the version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fetch the 1999 server release
+        run: |
+          curl -fsSL --retry 3 --retry-delay 5 -o "$SV_ZIP" "$MIRROR/$SV_ZIP"
+          echo "$SV_MD5  $SV_ZIP" | md5sum -c -
+          mkdir -p orig/sv
+          unzip -qo "$SV_ZIP" -d orig/sv
+          # arena.cfg, motd.txt, server.cfg, readsrv.txt and raserver.bat stay;
+          # the win32/i386/mips/sparc/axp modules are what this build replaces.
+          rm -f orig/sv/gamex86.dll orig/sv/game*.so
+          ls -l orig/sv
+
+      - name: Fetch the 1999 client release
+        if: env.INCLUDE_DATA == 'true'
+        run: |
+          curl -fsSL --retry 3 --retry-delay 5 -o "$CL_EXE" "$MIRROR/$CL_EXE"
+          echo "$CL_MD5  $CL_EXE" | md5sum -c -
+          # A WinZip self-extractor behind a DOS stub that unzip skips on its
+          # own: arena/pak0-2.pak, arena/readme.txt, arena/q2arena.qst and the
+          # VWEP skins, which 1999 put in baseq2/players.
+          mkdir -p orig/cl
+          unzip -qo "$CL_EXE" -d orig/cl
+          du -sh orig/cl/arena orig/cl/baseq2
+
+      - name: Assemble the packages
+        run: |
+          for p in windows linux; do
+            root=stage/$p
+            mkdir -p "$root/arena"
+            case $p in
+              windows) install -m644 bin/game_x64-windows/game_x64.dll "$root/arena/" ;;
+              linux)   install -m644 bin/game_x64-linux/game_x64.so    "$root/arena/" ;;
+            esac
+            install -m644 orig/sv/* "$root/arena/"
+            install -m644 ra2-gamedir/mapdb.json ra2-gamedir/pak3.pak "$root/arena/"
+            # the bots tree goes in whole, whatever it holds at this tag
+            cp -r ra2-gamedir/bots "$root/arena/"
+            install -m644 LICENSE.txt README.md "$root/arena/"
+            if [ "$INCLUDE_DATA" = true ]; then
+              install -m644 orig/cl/arena/* "$root/arena/"
+              # 1999 shipped the VWEP skins as baseq2/players; the gamedir is
+              # searched first, so they work from inside arena/ and the package
+              # stays a single folder.
+              cp -r orig/cl/baseq2/players "$root/arena/"
+            fi
+            # 1999's server.cfg turns RA2's netlog on by default and points it
+            # at ripper.planetquake.com:21998 -- the author's stats collector,
+            # which is a parked domain today resolving to an unrelated host.
+            # This port carries no netlog code at all (see gslog.cpp), so the
+            # line is inert; comment it out anyway rather than ship a live
+            # looking setting that silently does nothing. Runs last, so the
+            # INCLUDE_DATA copy above cannot reintroduce it.
+            if grep -q '^[[:space:]]*set[[:space:]]\+netlog' "$root/arena/server.cfg"; then
+              # \r\n, not \n: 1999's cfg is CRLF throughout, and the inserted
+              # lines should not be the only LF-only ones in the file
+              sed -i 's|^[[:space:]]*set[[:space:]]\+netlog|// netlog is not supported by this port, and the 1999 collector\r\n// below is a parked domain now -- see README.md\r\n//set netlog|' \
+                  "$root/arena/server.cfg"
+            fi
+          done
+          find stage/linux -type f | sort
+
+      - name: Check the packages
+        run: |
+          for p in windows linux; do
+            root=stage/$p
+            diff <(cd ra2-gamedir && find bots -type f | sort) \
+                 <(cd "$root/arena" && find bots -type f | sort)
+            for f in arena.cfg motd.txt server.cfg readsrv.txt mapdb.json pak3.pak \
+                     bots/game_rules.txt LICENSE.txt README.md; do
+              test -s "$root/arena/$f"
+            done
+            # no active netlog line may survive the rewrite above
+            ! grep -q '^[[:space:]]*set[[:space:]]\+netlog' "$root/arena/server.cfg"
+            # no 1999 game module may have survived the filter above
+            test -z "$(find "$root" -name 'gamex86.dll' -o -name 'game*.so' \
+                       ! -name 'game_x64.so')"
+            if [ "$INCLUDE_DATA" = true ]; then
+              for f in pak0.pak pak1.pak pak2.pak readme.txt q2arena.qst; do
+                test -s "$root/arena/$f"
+              done
+              test 58 -eq "$(find "$root/arena/players" -type f | wc -l)"
+            fi
+          done
+          test -s stage/windows/arena/game_x64.dll
+          test -s stage/linux/arena/game_x64.so
+          # arena/ is the whole package; nothing may sit beside it
+          test "arena" = "$(ls stage/windows)" && test "arena" = "$(ls stage/linux)"
+
+      - name: Zip
+        run: |
+          mkdir -p dist
+          n=rocketarena2-rerelease-$VERSION
+          (cd stage/windows && zip -qr "$GITHUB_WORKSPACE/dist/$n-windows-x64.zip" .)
+          (cd stage/linux   && zip -qr "$GITHUB_WORKSPACE/dist/$n-linux-x86_64.zip" .)
+          cd dist
+          sha256sum -- *.zip > SHA256SUMS.txt
+          ls -l
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-packages
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Write the release notes
+        if: github.ref_type == 'tag'
+        run: |
+          {
+            echo "Rocket Arena 2 for the Quake II rerelease, version $VERSION."
+            echo
+            echo "Unzip into your Quake II mods directory -- on Windows that is"
+            echo '`%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\` -- and'
+            echo 'launch with `+set game arena`.'
+            echo
+            echo "Each package is a complete \`arena\` gamedir:"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| \`game_x64.dll\` / \`game_x64.so\` | built from this tag |"
+            echo "| \`arena.cfg\` \`motd.txt\` \`server.cfg\` \`readsrv.txt\` \`raserver.bat\` | Rocket Arena 2 2.50, unchanged |"
+            if [ "$INCLUDE_DATA" = true ]; then
+              echo "| \`pak0.pak\` \`pak1.pak\` \`pak2.pak\` \`readme.txt\` \`q2arena.qst\` \`players/\` | Rocket Arena 2 2.50, unchanged |"
+            fi
+            echo "| \`mapdb.json\` \`pak3.pak\` \`bots/\` | this repo's gamedir overlay |"
+            echo
+            echo "The 1999 files come from the idgames2 mirror, checksum-pinned in the workflow:"
+            echo
+            echo "* \`$MIRROR/$SV_ZIP\` (md5 \`$SV_MD5\`)"
+            if [ "$INCLUDE_DATA" = true ]; then
+              echo "* \`$MIRROR/$CL_EXE\` (md5 \`$CL_MD5\`)"
+            fi
+            echo
+            echo "That release's own game modules (\`gamex86.dll\`, \`gamei386.so\`,"
+            echo "\`gamemips.so\`, \`gamesparc.so\`, \`gameaxp.so\`) are left out."
+            echo
+            echo "Windows is the only PC platform Nightdive shipped, so the Linux"
+            echo "module is for source ports that implement the rerelease game API."
+          } > dist/NOTES.md
+          cat dist/NOTES.md
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Rocket Arena 2 $VERSION" \
+            --notes-file dist/NOTES.md \
+            dist/*.zip dist/SHA256SUMS.txt

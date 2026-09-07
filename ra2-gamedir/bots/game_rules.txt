@@ -1,0 +1,138 @@
+// Rocket Arena 2 override of the stock bots/game_rules.txt.
+//
+// Deploy as <gamedir>/bots/game_rules.txt -- i.e. arena/bots/game_rules.txt
+// next to arena.cfg. The engine's Settings Manager loads the bare path
+// "bots/game_rules.txt" through the pak filesystem, and the arena paks are
+// added after baseq2's, so the mod gamedir wins. Everything below the RA2
+// block is the stock file verbatim, so a non-RA2 gametype run out of this
+// gamedir still classifies exactly as it did before.
+//
+// Why this file exists: the engine's bot AI is closed source and decides
+// "is this a team game, and which gametype" purely from the cvar/value
+// pairs below. RA2 is none of deathmatch/teamplay/coop/ctf, so with the
+// stock rules an arena match classifies as plain dm with no teams, and the
+// bots have no reason not to shoot their own team-mates.
+//
+// The obvious fix -- setting `teamplay 1` so the stock tdm entry matches --
+// is not available to us: the game DLL reads that same cvar. It is
+// CVAR_LATCH, G_TeamplayEnabled() is `ctf || teamplay`, and roughly thirty
+// sites then branch into CTF-style logic keyed on resp.ctf_team, which RA2
+// never assigns (every client would read as CTF_NOTEAM). InitGame forces
+// teamplay back to 0 under ra2 for that reason. Matching on `ra2` here
+// scopes "this is a team game" to the bot system and nothing else.
+//
+// The DLL half of the mapping lives in Player_UpdateState()
+// (bots/bot_utils.cpp), which fills edict_t::sv.team from
+// RA2_TeamIndexForBots(): 1 for the arena's first active team, 2 for the
+// second, 0 while a client is queued, dead or watching. Those are exactly
+// the values bots/teams.txt translates to "Red Team" and "Blue Team".
+//
+// Team damage is deliberately left to the stock g_friendly_fire entry
+// below. RA2 protects team-mates per arena via healthprotect/armorprotect
+// (see OnSameTeam() in g_combat.cpp), which is finer-grained than the one
+// global flag the bots get; with g_friendly_fire at its default 0 the bots
+// are told team_damage false, matching RA2's default protected team-mates.
+//
+// To confirm the override is being picked up, load a level and look for
+// "Settings Manager: Found 8 Game Settings" in stdout.txt. The stock file
+// yields 7.
+
+{ // RA2 -- must stay ahead of the stock `deathmatch 1` entry below
+  cvar				ra2
+  value				1
+
+  has_teams			true
+  game_type			tdm
+}
+
+// Overview Of Game Rule Properties:
+
+// cvar: 			name of the cvars to check ( Max is 2 cvars )
+// value:			value of the cvars to check ( Max is 2 cvars )	
+
+// Valid Game Settings ( all are either 'true' or 'false' - default is 'false' ):
+// weapon_stay:		if 'cvar' & 'value' match - whether or not weapons stay
+// team_damage:		if 'cvar' & 'value' match - whether or not you hurt team members
+// has_teams		if 'cvar' & 'value' match - gametype is a team game
+// game_type:		if 'cvar' & 'value' match - what gametype is active
+// only_gametype:	only check the cvars if the gametype is this
+// not_gametype:	only check the cvars if the gametype is NOT this
+// logic_op:		set to 'and' if both cvars must be true, 'or' if only one - default: 'or'
+
+// NOTE: the settings for a particular game mode are set based on matching cvar/value
+// NOTE: pairs, using a "first come, first served" rule for each entry
+
+
+// Valid Game Types:
+
+//	dm:				Deathmatch 
+// 	tdm:			Team Deathmatch
+//	coop: 			Cooperative
+// 	ctf:			Capture The Flag
+
+// Valid Logic Ops:
+
+// and:				Logical "And" ( both cvars must be true ).
+// or:				Logical "Or" ( one cvar must be true ).
+
+
+// Valie Gametype Cvars
+{
+  cvar				teamplay
+  value				1
+  
+  has_teams			true
+  game_type			tdm
+}
+
+{
+  cvar				coop
+  value				1
+  
+  has_teams			true
+  game_type			coop
+}
+
+{
+  cvar				deathmatch
+  value				1
+  
+  game_type			dm
+}
+
+{
+  cvar				ctf
+  value				1
+  
+  has_teams			true
+  game_type			ctf
+}
+
+// Valid Game Setting Cvars
+
+{
+  cvar				g_friendly_fire
+  value				1
+  
+  team_damage 		true
+}
+
+{ // dm/tdm/ctf all use the same cvar below for weapon stay
+ not_gametype      	coop 
+ cvar               g_dm_weapons_stay
+ value              1
+
+ weapon_stay        true
+}
+
+{ // checks that both cvars are set to the value below
+ only_gametype      coop
+ cvar               g_coop_instanced_items
+ value              0
+ logic_op			and
+ cvar               g_coop_squad_respawn
+ value              0
+
+ weapon_stay        true
+}
+

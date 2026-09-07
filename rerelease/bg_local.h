@@ -70,6 +70,16 @@ enum
 
 	CONFIG_STORY,
 
+	// RA2 -- reserved slots send_configstring() fakes a per-client-only
+	// svc_configstring update into (never gi.configstring()'d for real,
+	// so the same slot number can show different text to clients
+	// watching different arenas without colliding); see arena.cpp's
+	// show_countdown/UpdateStatusBars.
+	CONFIG_RA2_ARENASTATUS,	 // "Waiting for match to start" or arena_t::vs
+	CONFIG_RA2_ROUNDINFO,	 // "Round X of Y", or "" for single-round matches
+	CONFIG_RA2_QUEUE1_NAME,	 // name of the team in this client's 1st queue slot
+	CONFIG_RA2_QUEUE2_NAME,	 // name of the team in this client's 2nd queue slot
+
 	CONFIG_LAST
 };
 
@@ -256,6 +266,25 @@ enum player_stat_t
 	STAT_HEALTH_BARS, // two health bar values; 7 bits for value, 1 bit for active
 	// [Paril-KEX]
 	STAT_ACTIVE_WEAPON,
+
+	// RA2 -- gated behind ra2->integer, never active at the same time as
+	// the CTF stats above. Faithful to original RA2's own stat layout
+	// (q_shared.h STAT_COUNTDOWN/STAT_ARENASTATUS/STAT_ROUNDINFO/
+	// STAT_QUEUE1/STAT_QUEUE2/STAT_SHOWQUEUE/STAT_QUEUE1_ICON/
+	// STAT_QUEUE2_ICON/STAT_SKIN_ICON, plus an unnamed observer-ID-view
+	// slot), renamed/regrouped for clarity -- see arena.cpp's
+	// show_countdown/UpdateStatusBars/CTFSetIDView for what writes each.
+	STAT_RA2_COUNTDOWN,      // num: seconds remaining in WARMUP/COUNTDOWN; 0 doubles as this block's own "if" gate
+	STAT_RA2_ARENASTATUS,    // stat_string: CONFIG_RA2_ARENASTATUS's current per-client text (waiting/vs line)
+	STAT_RA2_ROUNDINFO,      // stat_string: CONFIG_RA2_ROUNDINFO's current per-client text ("Round X of Y")
+	STAT_RA2_SHOWQUEUE,      // non-zero if the queue block below should be drawn
+	STAT_RA2_QUEUE1,         // num: this client's team's queue slot 1 count/position
+	STAT_RA2_QUEUE2,         // num: this client's team's queue slot 2 count/position
+	STAT_RA2_QUEUE1_NAME,    // stat_string: CONFIG_RA2_QUEUE1_NAME's current per-client text
+	STAT_RA2_QUEUE2_NAME,    // stat_string: CONFIG_RA2_QUEUE2_NAME's current per-client text
+	STAT_RA2_ID_VIEW,        // stat_pname: raw entity index of the player an observer is tracking or an "id" fighter is aiming at (0 = none), same modern verb as STAT_CTF_ID_VIEW
+	STAT_RA2_SKIN_ICON,      // pic: this client's own team-skin icon (aliases the STAT_HEALTH_ICON slot's role in vanilla, RA2 never draws a health icon)
+	STAT_RA2_LINEPOSITION,   // num: how many teams are ahead of this client's in its arena's queue; read by the observer bar UpdateStatusBars sends
 
 	// don't use; just for verification
     STAT_LAST

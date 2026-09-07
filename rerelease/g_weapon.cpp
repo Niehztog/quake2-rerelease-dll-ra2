@@ -1,6 +1,7 @@
 // Copyright (c) ZeniMax Media Inc.
 // Licensed under the GNU General Public License 2.0.
 #include "g_local.h"
+#include "rocketarena2/arena.h"
 
 /*
 =================
@@ -355,6 +356,9 @@ TOUCH(blaster_touch) (edict_t *self, edict_t *other, const trace_t &tr, bool oth
 	if (other == self->owner)
 		return;
 
+	if (ra2->integer && !other->solid)
+		return;
+
 	if (tr.surface && (tr.surface->flags & SURF_SKY))
 	{
 		G_FreeEdict(self);
@@ -485,6 +489,9 @@ THINK(Grenade_Explode) (edict_t *ent) -> void
 TOUCH(Grenade_Touch) (edict_t *ent, edict_t *other, const trace_t &tr, bool other_touching_self) -> void
 {
 	if (other == ent->owner)
+		return;
+
+	if (ra2->integer && !other->solid)
 		return;
 
 	if (tr.surface && (tr.surface->flags & SURF_SKY))
@@ -653,6 +660,9 @@ TOUCH(rocket_touch) (edict_t *ent, edict_t *other, const trace_t &tr, bool other
 	vec3_t origin;
 
 	if (other == ent->owner)
+		return;
+
+	if (ra2->integer && !other->solid)
 		return;
 
 	if (tr.surface && (tr.surface->flags & SURF_SKY))
@@ -958,7 +968,7 @@ THINK(bfg_explode) (edict_t *self) -> void
 				continue;
 			// ZOID
 			// don't target players in CTF
-			if (CheckTeamDamage(ent, self->owner))
+			if (!ra2->integer && CheckTeamDamage(ent, self->owner))
 				continue;
 			// ZOID
 
@@ -989,6 +999,9 @@ THINK(bfg_explode) (edict_t *self) -> void
 TOUCH(bfg_touch) (edict_t *self, edict_t *other, const trace_t &tr, bool other_touching_self) -> void
 {
 	if (other == self->owner)
+		return;
+
+	if (ra2->integer && !other->solid)
 		return;
 
 	if (tr.surface && (tr.surface->flags & SURF_SKY))
@@ -1090,6 +1103,9 @@ THINK(bfg_think) (edict_t *self) -> void
 		if (ent == self)
 			continue;
 
+		if (ra2->integer && !ent->solid)
+			continue;
+
 		if (ent == self->owner)
 			continue;
 
@@ -1101,7 +1117,7 @@ THINK(bfg_think) (edict_t *self) -> void
 			continue;
 		// ZOID
 		// don't target players in CTF
-		if (CheckTeamDamage(ent, self->owner))
+		if (!ra2->integer && CheckTeamDamage(ent, self->owner))
 			continue;
 		// ZOID
 

@@ -13,6 +13,9 @@ constexpr const char *sb_nums[2][11] =
     }
 };
 
+// undef: glibc's <limits.h> (pulled in transitively) defines CHAR_WIDTH as a
+// macro on some platforms; undef so our own constant isn't macro-expanded.
+#undef CHAR_WIDTH
 constexpr int32_t CHAR_WIDTH    = 16;
 constexpr int32_t CONCHAR_WIDTH = 8;
 
@@ -65,6 +68,10 @@ struct cl_centerprint_t {
     uint64_t    time_tick, time_off; // time to remove at
 };
 
+// deliberately not LAYOUTS_RA2_NO_PUTAWAY: this only decides whether centerprints
+// get pinned to the top of the screen, and the content carrying that bit -- RA2's
+// audience bar and its boards -- lived on CS_STATUSBAR in the original, which never
+// shifted anything. A visible RA2 menu still carries LAYOUTS_LAYOUT and still does.
 inline bool CG_ViewingLayout(const player_state_t *ps)
 {
     return ps->stats[STAT_LAYOUTS] & (LAYOUTS_LAYOUT | LAYOUTS_INVENTORY);
@@ -82,7 +89,9 @@ inline bool CG_HudHidden(const player_state_t *ps)
 
 layout_flags_t CG_LayoutFlags(const player_state_t *ps)
 {
-    return (layout_flags_t) ps->stats[STAT_LAYOUTS];
+    // LAYOUTS_RA2_NO_PUTAWAY is this DLL's own; the engine only ever sees bits it
+    // knows about.
+    return (layout_flags_t) (ps->stats[STAT_LAYOUTS] & ~(int16_t) LAYOUTS_RA2_NO_PUTAWAY);
 }
 
 #include <optional>
@@ -1738,7 +1747,7 @@ void CG_DrawHUD (int32_t isplit, const cg_server_data_t *data, vrect_t hud_vrect
     CG_DrawNotify(isplit, hud_vrect, hud_safe, scale);
 
     // svc_layout still drawn with hud off
-    if (ps->stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT)
+    if (ps->stats[STAT_LAYOUTS] & (LAYOUTS_LAYOUT | LAYOUTS_RA2_NO_PUTAWAY))
         CG_ExecuteLayoutString(data->layout, hud_vrect, hud_safe, scale, playernum, ps);
 
     // inventory too

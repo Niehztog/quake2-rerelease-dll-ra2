@@ -2,6 +2,14 @@
 // Licensed under the GNU General Public License 2.0.
 #include "g_local.h"
 #include "m_player.h"
+#include "rocketarena2/arena.h"
+#include "rocketarena2/ra2_menu.h"
+
+void list_keys(edict_t *ent);
+void print_map_loop(edict_t *ent);
+void Cmd_admin_f(edict_t *ent);
+void Cmd_arenaadmin_f(edict_t *ent, int32_t mode);
+void Cmd_menuhelp_f(edict_t *ent);
 
 void SelectNextItem(edict_t *ent, item_flags_t itflags, bool menu = true)
 {
@@ -10,6 +18,12 @@ void SelectNextItem(edict_t *ent, item_flags_t itflags, bool menu = true)
 	gitem_t	*it;
 
 	cl = ent->client;
+
+	if (ra2->integer && MenuShown(ent))
+	{
+		MenuNext(ent);
+		return;
+	}
 
 	// ZOID
 	if (menu && cl->menu)
@@ -52,6 +66,12 @@ void SelectPrevItem(edict_t *ent, item_flags_t itflags)
 	gitem_t	*it;
 
 	cl = ent->client;
+
+	if (ra2->integer && MenuShown(ent))
+	{
+		MenuPrev(ent);
+		return;
+	}
 
 	// ZOID
 	if (cl->menu)
@@ -672,6 +692,14 @@ void Cmd_Drop_f(edict_t *ent)
 	if (ent->health <= 0 || ent->deadflag)
 		return;
 
+	// RA2 -- nothing is droppable in an arena. Each round hands out a fixed
+	// loadout (give_ammo) and no item with a pickup function is ever spawned
+	// into the map (SpawnItem), so dropping one would litter the arena with
+	// something that has no business being there. The original empties this
+	// command's body out entirely, and the invdrop path below with it.
+	if (ra2->integer)
+		return;
+
 	// ZOID--special case for tech powerups
 	if (Q_strcasecmp(gi.args(), "tech") == 0)
 	{
@@ -734,6 +762,22 @@ void Cmd_Inven_f(edict_t *ent)
 
 	cl = ent->client;
 
+	// TAB toggles the menu on and off, which is RA2's only way in or out of it:
+	// the original's whole Cmd_Inven_f was "flip showmenu, redisplay", and
+	// show_observer_menu loads its screen hidden for exactly this. The menu
+	// stays on the stack while hidden, so the same screen comes back and [ ] and
+	// ENTER go back to being item keys in the meantime.
+	if (ra2->integer)
+	{
+		cl->showmenu = cl->showmenu ? false : (cl->curmenulink != nullptr);
+		globals.server_flags &= ~SERVER_FLAG_SLOW_TIME;
+		DisplayMenu(ent);
+		// RA2 replaces this command outright -- there is no inventory overlay
+		// path in it at all, and with a fixed per-round loadout there is
+		// nothing an inventory screen would be for.
+		return;
+	}
+
 	cl->showscores = false;
 	cl->showhelp = false;
 
@@ -780,6 +824,13 @@ Cmd_InvUse_f
 void Cmd_InvUse_f(edict_t *ent)
 {
 	gitem_t *it;
+
+	if (ra2->integer && MenuShown(ent))
+	{
+		if (!level.intermissiontime)
+			UseMenu(ent, 1);
+		return;
+	}
 
 	// ZOID
 	if (ent->client->menu)
@@ -943,6 +994,23 @@ Cmd_InvDrop_f
 */
 void Cmd_InvDrop_f(edict_t *ent)
 {
+	// RA2 -- invdrop is the menu's second select key, not a way out of it: it
+	// runs the same callback invuse does but with arg 0, which is how every
+	// value row in the admin/settings/propose screens gets stepped *down*
+	// (menuChangeValue*/menuChangeProtect) and how menuAddtoArena tells its
+	// "join out of line" entry apart from a plain join. "Cancel"/"No" rows are
+	// what close a screen. PopMenu still backs out of the message screens (see
+	// menu_centerprint) and out of putaway.
+	if (ra2->integer)
+	{
+		if (MenuShown(ent))
+			UseMenu(ent, 0);
+
+		// and with no menu up there is nothing else for it to do -- see
+		// Cmd_Drop_f above
+		return;
+	}
+
 	gitem_t *it;
 
 	if (ent->health <= 0 || ent->deadflag)
@@ -1092,6 +1160,50 @@ Cmd_PutAway_f
 */
 void Cmd_PutAway_f(edict_t *ent)
 {
+	// Under RA2 escape only reaches putaway with a menu on screen -- the boards
+	// and the audience bar carry LAYOUTS_RA2_NO_PUTAWAY, so the engine leaves
+	// escape alone for them (see RA2_LayoutFlag). A hand-bound putaway can still
+	// arrive over a board, though, so both arms stay.
+	if (ra2->integer)
+	{
+		// Cmd_Score_f early-returns during intermission, so blanking the board
+		// here would leave an empty screen with nothing able to bring it back.
+		if (level.intermissiontime)
+			return;
+
+		ent->client->showhelp = false;
+		ent->client->showinventory = false;
+
+		if (MenuShown(ent))
+		{
+			// Deliberate deviation from RA2. The original's menus lived on the
+			// CS_STATUSBAR configstring, never saw escape at all, and so had no
+			// back key -- only a "Cancel"/"No" row or TAB. Here escape backs out
+			// one screen, and on the last one it hides the menu the way TAB does
+			// rather than popping it: popping the last screen nulls curmenulink,
+			// and Cmd_Inven_f cannot bring a null menu back, which would strand
+			// the client with no way to join a team. On screen the two look the
+			// same, and the stack survives.
+			if (MenuIsBase(ent))
+			{
+				ent->client->showmenu = false;
+				DisplayMenu(ent);
+			}
+			else
+				PopMenu(ent);
+		}
+		else if (ent->client->scoremode)
+		{
+			// RA2's own putaway: drop the boards. Repainting is this port's need
+			// -- with one layout channel, clearing scoremode has to hand the
+			// channel back to whatever is under the board (the menu, or nothing).
+			ent->client->scoremode = 0;
+			DisplayMenu(ent);
+		}
+
+		return;
+	}
+
 	ent->client->showscores = false;
 	ent->client->showhelp = false;
 	ent->client->showinventory = false;
@@ -1391,6 +1503,16 @@ void Cmd_Wave_f(edict_t *ent)
 Cmd_Say_f
 
 NB: only used for non-Playfab stuff
+
+RA2 NOTE: RA2's g_cmds.c rewrites this function to scope plain "say" text
+to the speaker's own arena (via show_string(1, ..., resp.context)) and adds
+a message-flood auto-disconnect (5 messages within 2 seconds). That RA2
+behavior is NOT ported: under KEX_Q2_GAME (the real build config) this
+whole function -- and the "say"/"say_team" dispatch in ClientCommand below
+-- is compiled out and unreachable, since chat text is now routed entirely
+through the engine's lobby/Playfab system rather than the game DLL. There
+is no remaining DLL-level hook to scope or rate-limit chat text in that
+configuration, so RA2's arena-scoped chat is structurally unportable here.
 ==================
 */
 void Cmd_Say_f(edict_t *ent, bool arg0)
@@ -1609,6 +1731,8 @@ void ClientCommand(edict_t *ent)
 		return;
 	}
 	// [Paril-KEX] these have to go through the lobby system
+	// RA2 -- arena-scoped "say"/spam-kick logic is not portable here; see
+	// the RA2 NOTE on Cmd_Say_f's definition above for why.
 #ifndef KEX_Q2_GAME
 	if (Q_strcasecmp(cmd, "say") == 0)
 	{
@@ -1698,6 +1822,8 @@ void ClientCommand(edict_t *ent)
 		Cmd_WeapNext_f( ent );
 	else if ( Q_strcasecmp( cmd, "weaplast" ) == 0 || Q_strcasecmp( cmd, "lastweap" ) == 0 )
 		Cmd_WeapLast_f( ent );
+	else if (ra2->integer && Q_strcasecmp(cmd, "kill") == 0)
+		;
 	else if ( Q_strcasecmp( cmd, "kill" ) == 0 )
 		Cmd_Kill_f( ent );
 	else if ( Q_strcasecmp( cmd, "kill_ai" ) == 0 )
@@ -1712,7 +1838,48 @@ void ClientCommand(edict_t *ent)
 		Cmd_Wave_f(ent);
 	else if (Q_strcasecmp(cmd, "playerlist") == 0)
 		Cmd_PlayerList_f(ent);
+	else if (ra2->integer && Q_strcasecmp(cmd, "admin") == 0)
+		Cmd_admin_f(ent);
+	else if (ra2->integer && Q_strcasecmp(cmd, "arenaadmin") == 0)
+		Cmd_arenaadmin_f(ent, 0);
+	else if (ra2->integer && Q_strcasecmp(cmd, "menuhelp") == 0)
+		Cmd_menuhelp_f(ent);
+	else if (ra2->integer && Q_strcasecmp(cmd, "pcount") == 0)
+		return; // RA2 -- silently ignored, not treated as chat
+	else if (ra2->integer && Q_strcasecmp(cmd, "getdebugcode") == 0)
+		return; // RA2 -- ditto
+	else if (ra2->integer && Q_strcasecmp(cmd, "grap_on") == 0)
+		ent->client->hookbutton = true;
+	else if (ra2->integer && Q_strcasecmp(cmd, "grap_off") == 0)
+		ent->client->hookbutton = false;
+	else if (ra2->integer && Q_strcasecmp(cmd, "listkeys") == 0)
+		list_keys(ent);
+	else if (ra2->integer && Q_strcasecmp(cmd, "listmaps") == 0)
+		print_map_loop(ent);
+	else if (ra2->integer && Q_strcasecmp(cmd, "nextmap") == 0)
+	{
+		// get_next_map returns null when arena.cfg carries no maploop, and a
+		// null char pointer is not something the formatter can be handed
+		const char *next_map = get_next_map(level.mapname);
+		gi.LocClient_Print(ent, PRINT_MEDIUM, "Next map is {}\n", next_map ? next_map : "not set");
+	}
+	else if (ra2->integer && Q_strcasecmp(cmd, "play") == 0)
+		return;
 	// ZOID
+	// CTF's global election and warp commands are otherwise still reachable
+	// through this shared dispatcher even though RA2 has disabled CTF.
+	else if (ra2->integer &&
+		(Q_strcasecmp(cmd, "team") == 0 ||
+		 Q_strcasecmp(cmd, "yes") == 0 ||
+		 Q_strcasecmp(cmd, "no") == 0 ||
+		 Q_strcasecmp(cmd, "ready") == 0 ||
+		 Q_strcasecmp(cmd, "notready") == 0 ||
+		 Q_strcasecmp(cmd, "ghost") == 0 ||
+		 Q_strcasecmp(cmd, "stats") == 0 ||
+		 Q_strcasecmp(cmd, "warp") == 0 ||
+		 Q_strcasecmp(cmd, "boot") == 0 ||
+		 Q_strcasecmp(cmd, "observer") == 0))
+		return;
 	else if (Q_strcasecmp(cmd, "team") == 0)
 		CTFTeam_f(ent);
 	else if (Q_strcasecmp(cmd, "id") == 0)

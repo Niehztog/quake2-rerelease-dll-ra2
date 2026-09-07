@@ -21,6 +21,13 @@
 #include <numeric>
 #include <functional>
 
+// MSVC's CRT exposes isnan/isinf/etc in the global namespace (in addition to
+// std::), but libstdc++'s <cmath> only guarantees them in std::. Several
+// source files call these unqualified, so bring them into the global
+// namespace here to match MSVC's behavior on other toolchains.
+using std::isnan;
+using std::isinf;
+
 // format!
 #ifndef USE_CPP20_FORMAT
 #ifdef __cpp_lib_format

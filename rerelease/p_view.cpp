@@ -4,6 +4,8 @@
 #include "g_local.h"
 #include "m_player.h"
 #include "bots/bot_includes.h"
+#include "rocketarena2/arena.h"
+#include "rocketarena2/ra2_menu.h"
 
 static edict_t   *current_player;
 static gclient_t *current_client;
@@ -22,6 +24,9 @@ SkipViewModifiers
 */
 inline bool SkipViewModifiers() {
 	if ( g_skipViewModifiers->integer && sv_cheats->integer ) {
+		return true;
+	}
+	if (ra2->integer && current_client->resp.fightstate != FIGHT_ALIVE) {
 		return true;
 	}
 	// don't do bobbing, etc on grapple
@@ -998,6 +1003,9 @@ void G_SetClientEvent(edict_t *ent)
 	if (ent->s.event)
 		return;
 
+	if (ra2->integer && (!ent->client || ent->client->resp.fightstate != FIGHT_ALIVE))
+		return;
+
 	if (ent->client->ps.pmove.pm_flags & PMF_ON_LADDER)
 	{
 		if (!deathmatch->integer &&
@@ -1369,8 +1377,11 @@ void ClientEndServerFrame(edict_t *ent)
 	// If it wasn't updated here, the view position would lag a frame
 	// behind the body position when pushed -- "sinking into plats"
 	//
-	current_client->ps.pmove.origin = ent->s.origin;
-	current_client->ps.pmove.velocity = ent->velocity;
+	if (!(ra2->integer && ent->client->resp.track_target && ent->client->resp.fightstate == FIGHT_SPECTATING))
+	{
+		current_client->ps.pmove.origin = ent->s.origin;
+		current_client->ps.pmove.velocity = ent->velocity;
+	}
 
 	//
 	// If the end of unit layout is displayed, don't give
@@ -1465,13 +1476,18 @@ void ClientEndServerFrame(edict_t *ent)
 	// determine the full screen color blend
 	// must be after viewoffset, so eye contents can be
 	// accurately determined
-	SV_CalcBlend(ent);
-
-	// chase cam stuff
-	if (ent->client->resp.spectator)
-		G_SetSpectatorStats(ent);
+	if (ra2->integer && ent->client->resp.track_target && ent->client->resp.fightstate == FIGHT_SPECTATING)
+		current_client->ps.screen_blend = current_client->ps.damage_blend = {};
 	else
-		G_SetStats(ent);
+	{
+		SV_CalcBlend(ent);
+
+		// chase cam stuff
+		if (ent->client->resp.spectator)
+			G_SetSpectatorStats(ent);
+		else
+			G_SetStats(ent);
+	}
 
 	G_CheckChaseStats(ent);
 
@@ -1490,7 +1506,7 @@ void ClientEndServerFrame(edict_t *ent)
 	ent->client->oldgroundentity = ent->groundentity;
 
 	// ZOID
-	if (ent->client->menudirty && ent->client->menutime <= level.time)
+	if (!ra2->integer && ent->client->menudirty && ent->client->menutime <= level.time)
 	{
 		if (ent->client->menu)
 		{
@@ -1502,8 +1518,19 @@ void ClientEndServerFrame(edict_t *ent)
 	}
 	// ZOID
 
+	if (ra2->integer && MenuThink(ent))
+		return;
+
 	// if the scoreboard is up, update it
-	if (ent->client->showscores && ent->client->menutime <= level.time)
+	if (ra2->integer)
+	{
+		if (ent->client->scoremode && !MenuShown(ent) && !(gi.ServerFrame() & 31))
+		{
+			DeathmatchScoreboardMessage(ent, ent->enemy);
+			gi.unicast(ent, false);
+		}
+	}
+	else if (ent->client->showscores && ent->client->menutime <= level.time)
 	{
 		// ZOID
 		if (ent->client->menu)

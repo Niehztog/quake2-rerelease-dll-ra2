@@ -1371,7 +1371,7 @@ TOUCH(blaster2_touch) (edict_t *self, edict_t *other, const trace_t &tr, bool ot
 	G_FreeEdict(self);
 }
 
-void fire_blaster2(edict_t *self, const vec3_t &start, const vec3_t &dir, int damage, int speed, effects_t effect, bool hyper)
+void fire_blaster2(edict_t *self, const vec3_t &start, const vec3_t &dir, int damage, int speed, effects_t effect, bool is_hyper)
 {
 	edict_t *bolt;
 	trace_t	 tr;

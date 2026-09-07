@@ -1,6 +1,7 @@
 // Copyright (c) ZeniMax Media Inc.
 // Licensed under the GNU General Public License 2.0.
 #include "g_local.h"
+#include "rocketarena2/arena.h"
 #include "bots/bot_includes.h"
 
 bool Pickup_Weapon(edict_t *ent, edict_t *other);
@@ -1303,6 +1304,20 @@ void SpawnItem(edict_t *ent, gitem_t *item)
 	{
 		ent->spawnflags = SPAWNFLAG_NONE;
 		gi.Com_PrintFmt("{} has invalid spawnflags set\n", *ent);
+	}
+
+	// RA2 -- an arena hands out its whole loadout at the start of a round
+	// (give_ammo) and nothing is meant to be picked up during one, so no item
+	// with a pickup function reaches the map. This is the original verbatim:
+	// RA2 replaces vanilla's whole dmflags-driven removal block with exactly
+	// this test. (Its spawn table additionally stubs the four item_health*
+	// classnames to SP_none, which is redundant with this and is covered by
+	// RA2_IsPveOnlyClassname in g_spawn.cpp.)
+	if (ra2->integer && item->pickup)
+	{
+		PrecacheItem(item);
+		G_FreeEdict(ent);
+		return;
 	}
 
 	// some items will be prevented in deathmatch

@@ -100,12 +100,24 @@ using bit_t = std::conditional_t<n >= 32, uint64_t, uint32_t>;
 template<size_t n>
 constexpr bit_t<n> bit_v = 1ull << n;
 
-#if defined(KEX_Q2GAME_EXPORTS)
-    #define Q2GAME_API extern "C" __declspec( dllexport )
-#elif defined(KEX_Q2GAME_IMPORTS)
-    #define Q2GAME_API extern "C" __declspec( dllimport )
+#if defined(_WIN32)
+    #if defined(KEX_Q2GAME_EXPORTS)
+        #define Q2GAME_API extern "C" __declspec( dllexport )
+    #elif defined(KEX_Q2GAME_IMPORTS)
+        #define Q2GAME_API extern "C" __declspec( dllimport )
+    #else
+        #define Q2GAME_API
+    #endif
 #else
-    #define Q2GAME_API
+    // POSIX has nothing to import, and the exports are picked out of a
+    // -fvisibility=hidden build by the visibility attribute instead.
+    #if defined(KEX_Q2GAME_EXPORTS)
+        #define Q2GAME_API extern "C" __attribute__(( visibility( "default" ) ))
+    #elif defined(KEX_Q2GAME_IMPORTS)
+        #define Q2GAME_API extern "C"
+    #else
+        #define Q2GAME_API
+    #endif
 #endif
 
 // game.h -- game dll information visible to server
@@ -1588,7 +1600,16 @@ enum layout_flags_t : int16_t
 	LAYOUTS_HIDE_HUD	      = bit_v<2>, // hide entire hud, for cameras, etc
 	LAYOUTS_INTERMISSION      = bit_v<3>, // intermission is being drawn; collapse splitscreen into 1 view
 	LAYOUTS_HELP              = bit_v<4>, // help is active; escape remapped to putaway
-    LAYOUTS_HIDE_CROSSHAIR	  = bit_v<5> // hide crosshair only
+    LAYOUTS_HIDE_CROSSHAIR	  = bit_v<5>, // hide crosshair only
+	// RA2 -- private to this DLL, and deliberately high so a bit the engine adds
+	// later does not land on it. svc_layout is carrying RA2's own furniture: the
+	// audience bar, or a board RA2 dismisses through its own score cycle. Neither
+	// is something escape should put away. The original drew that content by
+	// swapping CS_STATUSBAR per client, which carried no putaway meaning at all;
+	// svc_layout is the only channel the rerelease leaves a mod, so the meaning
+	// has to be spelled out. CG_DrawHUD draws it and CG_LayoutFlags masks it out
+	// of what the engine sees.
+	LAYOUTS_RA2_NO_PUTAWAY    = bit_v<14>
 };
 MAKE_ENUM_BITFLAGS(layout_flags_t);
 

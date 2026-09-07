@@ -4,6 +4,7 @@
 
 #include "g_local.h"
 #include "m_player.h"
+#include "rocketarena2/arena.h"
 
 bool is_quad;
 // RAFAEL
@@ -19,6 +20,27 @@ void weapon_grenade_fire(edict_t *ent, bool held);
 // RAFAEL
 void weapon_trap_fire(edict_t *ent, bool held);
 // RAFAEL
+void CTFGrappleFire(edict_t *ent, const vec3_t &g_offset, int damage, effects_t effect);
+
+static inline bool RA2_FightAlive(edict_t *ent)
+{
+	return !ra2->integer || !ent->client || ent->client->resp.fightstate == FIGHT_ALIVE;
+}
+
+static inline bool RA2_FastSwitch(edict_t *ent)
+{
+	return ra2->integer && ent->client && arenas[ent->client->resp.context].settings.fastswitch;
+}
+
+static inline bool RA2_CanAttack(edict_t *ent)
+{
+	if (!ra2->integer || !ent->client)
+		return true;
+
+	return ent->takedamage &&
+		ent->client->resp.fightstate == FIGHT_ALIVE &&
+		arenas[ent->client->resp.context].state == ASTATE_FIGHTING;
+}
 
 //========
 // [Kex]
@@ -531,6 +553,23 @@ void Think_Weapon(edict_t *ent)
 			}
 		}
 	}
+
+	if (ra2->integer && allow_grapple)
+	{
+		// RA2's hook is a button held down while carrying any weapon, which the
+		// original delivered by aliasing +hook to its grap_on/grap_off client
+		// commands. The rerelease client cannot be handed an alias by the
+		// server, so the hook answers to BUTTON_USE as well: "+use" is a real
+		// usercmd button that nothing else in this game reads, so one plain
+		// bind reaches here with both a press and a release.
+		if (ent->client->hookbutton || (ent->client->buttons & BUTTON_USE))
+		{
+			if (ent->client->resp.fightstate == FIGHT_ALIVE && !ent->client->ctf_grapple)
+				CTFGrappleFire(ent, vec3_origin, 10, EF_NONE);
+		}
+		else if (ent->client->ctf_grapple)
+			CTFResetGrapple(ent->client->ctf_grapple);
+	}
 }
 
 enum weap_switch_t
@@ -731,7 +770,7 @@ inline bool Weapon_HandleActivating(edict_t *ent, int FRAME_ACTIVATE_LAST, int F
 		{
 			ent->client->weapon_think_time = level.time + Weapon_AnimationTime(ent);
 
-			if (ent->client->ps.gunframe == FRAME_ACTIVATE_LAST || g_instant_weapon_switch->integer)
+			if (ent->client->ps.gunframe == FRAME_ACTIVATE_LAST || g_instant_weapon_switch->integer || RA2_FastSwitch(ent))
 			{
 				ent->client->weaponstate = WEAPON_READY;
 				ent->client->ps.gunframe = FRAME_IDLE_FIRST;
@@ -773,7 +812,7 @@ inline bool Weapon_HandleNewWeapon(edict_t *ent, int FRAME_DEACTIVATE_FIRST, int
 				return true;
 			}
 
-			ent->client->ps.gunframe = FRAME_DEACTIVATE_FIRST;
+			ent->client->ps.gunframe = RA2_FastSwitch(ent) ? FRAME_DEACTIVATE_LAST : FRAME_DEACTIVATE_FIRST;
 
 			if ((FRAME_DEACTIVATE_LAST - FRAME_DEACTIVATE_FIRST) < 4)
 			{
@@ -812,7 +851,7 @@ inline weapon_ready_state_t Weapon_HandleReady(edict_t *ent, int FRAME_FIRE_FIRS
 	{
 		bool request_firing = ent->client->weapon_fire_buffered || ((ent->client->latched_buttons | ent->client->buttons) & BUTTON_ATTACK);
 
-		if (request_firing && ent->client->weapon_fire_finished <= level.time)
+		if (request_firing && ent->client->weapon_fire_finished <= level.time && RA2_CanAttack(ent))
 		{
 			ent->client->latched_buttons &= ~BUTTON_ATTACK;
 			ent->client->weapon_think_time = level.time;
@@ -880,6 +919,9 @@ void Weapon_Generic(edict_t *ent, int FRAME_ACTIVATE_LAST, int FRAME_FIRE_LAST, 
 	int FRAME_FIRE_FIRST = (FRAME_ACTIVATE_LAST + 1);
 	int FRAME_IDLE_FIRST = (FRAME_FIRE_LAST + 1);
 	int FRAME_DEACTIVATE_FIRST = (FRAME_IDLE_LAST + 1);
+
+	if (!RA2_FightAlive(ent))
+		return;
 
 	if (!Weapon_CanAnimate(ent))
 		return;
@@ -954,6 +996,9 @@ void Weapon_Repeating(edict_t *ent, int FRAME_ACTIVATE_LAST, int FRAME_FIRE_LAST
 	int FRAME_FIRE_FIRST = (FRAME_ACTIVATE_LAST + 1);
 	int FRAME_IDLE_FIRST = (FRAME_FIRE_LAST + 1);
 	int FRAME_DEACTIVATE_FIRST = (FRAME_IDLE_LAST + 1);
+
+	if (!RA2_FightAlive(ent))
+		return;
 
 	if (!Weapon_CanAnimate(ent))
 		return;
@@ -1055,7 +1100,7 @@ void Throw_Generic(edict_t *ent, int FRAME_FIRE_LAST, int FRAME_IDLE_LAST, int F
 	{
 		bool request_firing = ent->client->weapon_fire_buffered || ((ent->client->latched_buttons | ent->client->buttons) & BUTTON_ATTACK);
 
-		if (request_firing && ent->client->weapon_fire_finished <= level.time)
+		if (request_firing && ent->client->weapon_fire_finished <= level.time && RA2_CanAttack(ent))
 		{
 			ent->client->latched_buttons &= ~BUTTON_ATTACK;
 
@@ -1292,7 +1337,9 @@ void Weapon_RocketLauncher_Fire(edict_t *ent)
 
 	vec3_t start, dir;
 	P_ProjectSource(ent, ent->client->v_angle, { 8, 8, -8 }, start, dir);
-	fire_rocket(ent, start, dir, damage, 650, damage_radius, radius_damage);
+	fire_rocket(ent, start, dir, damage,
+		ra2->integer ? arenas[ent->client->resp.context].settings.rocket_speed : 650,
+		damage_radius, radius_damage);
 
 	P_AddWeaponKick(ent, ent->client->v_forward * -2, { -1.f, 0.f, 0.f });
 
@@ -1323,7 +1370,7 @@ BLASTER / HYPERBLASTER
 ======================================================================
 */
 
-void Blaster_Fire(edict_t *ent, const vec3_t &g_offset, int damage, bool hyper, effects_t effect)
+void Blaster_Fire(edict_t *ent, const vec3_t &g_offset, int damage, bool is_hyper, effects_t effect)
 {
 	if (is_quad)
 		damage *= damage_multiplier;
@@ -1331,20 +1378,20 @@ void Blaster_Fire(edict_t *ent, const vec3_t &g_offset, int damage, bool hyper, 
 	vec3_t start, dir;
 	P_ProjectSource(ent, ent->client->v_angle, vec3_t{ 24, 8, -8 } + g_offset, start, dir);
 
-	if (hyper)
+	if (is_hyper)
 		P_AddWeaponKick(ent, ent->client->v_forward * -2, { crandom() * 0.7f, crandom() * 0.7f, crandom() * 0.7f });
 	else
 		P_AddWeaponKick(ent, ent->client->v_forward * -2, { -1.f, 0.f, 0.f });
 
 	// let the regular blaster projectiles travel a bit faster because it is a completely useless gun
-	int speed = hyper ? 1000 : 1500;
+	int speed = is_hyper ? 1000 : 1500;
 
-	fire_blaster(ent, start, dir, damage, speed, effect, hyper ? MOD_HYPERBLASTER : MOD_BLASTER);
+	fire_blaster(ent, start, dir, damage, speed, effect, is_hyper ? MOD_HYPERBLASTER : MOD_BLASTER);
 
 	// send muzzle flash
 	gi.WriteByte(svc_muzzleflash);
 	gi.WriteEntity(ent);
-	if (hyper)
+	if (is_hyper)
 		gi.WriteByte(MZ_HYPERBLASTER | is_silenced);
 	else
 		gi.WriteByte(MZ_BLASTER | is_silenced);
@@ -1399,7 +1446,7 @@ void Weapon_HyperBlaster_Fire(edict_t *ent)
 	// fire frames
 	bool request_firing = ent->client->weapon_fire_buffered || (ent->client->buttons & BUTTON_ATTACK);
 
-	if (request_firing)
+	if (request_firing && RA2_CanAttack(ent))
 	{
 		if (ent->client->ps.gunframe >= 6 && ent->client->ps.gunframe <= 11)
 		{
@@ -1462,7 +1509,7 @@ void Machinegun_Fire(edict_t *ent)
 	int damage = 8;
 	int kick = 2;
 
-	if (!(ent->client->buttons & BUTTON_ATTACK))
+	if (!(ent->client->buttons & BUTTON_ATTACK) || !RA2_CanAttack(ent))
 	{
 		ent->client->machinegun_shots = 0;
 		ent->client->ps.gunframe = 6;
@@ -1553,7 +1600,9 @@ void Chaingun_Fire(edict_t *ent)
 	int	  damage;
 	int	  kick = 2;
 
-	if (deathmatch->integer)
+	if (ra2->integer)
+		damage = 6;
+	else if (deathmatch->integer)
 		damage = 6;
 	else
 		damage = 8;
@@ -1569,7 +1618,8 @@ void Chaingun_Fire(edict_t *ent)
 		ent->client->weapon_sound = 0;
 		return;
 	}
-	else if ((ent->client->ps.gunframe == 21) && (ent->client->buttons & BUTTON_ATTACK) && ent->client->pers.inventory[ent->client->pers.weapon->ammo])
+	else if ((ent->client->ps.gunframe == 21) && (ent->client->buttons & BUTTON_ATTACK) &&
+		ent->client->pers.inventory[ent->client->pers.weapon->ammo] && RA2_CanAttack(ent))
 	{
 		ent->client->ps.gunframe = 15;
 	}

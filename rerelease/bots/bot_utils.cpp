@@ -106,13 +106,29 @@ void Player_UpdateState( edict_t * player ) {
 		player->sv.ent_flags |= SVFL_WAS_TELEFRAGGED;
 	}
 
-	if ( player->client->resp.spectator ) {
+	// RA2 has no resp.spectator: a client is watching whenever it isn't a live
+	// fighter, which is the state every queued, dead and eliminated player sits
+	// in between rounds (see arena.h's fightstate_t). Reporting those as
+	// players is what has the AI try to fight while noclipping around as an
+	// invisible observer body.
+	if ( ra2->integer ) {
+		if ( player->client->resp.fightstate != FIGHT_ALIVE ) {
+			player->sv.ent_flags |= SVFL_IS_SPECTATOR;
+		}
+	} else if ( player->client->resp.spectator ) {
 		player->sv.ent_flags |= SVFL_IS_SPECTATOR;
 	}
 
-	player_skinnum_t pl_skinnum;
-	pl_skinnum.skinnum = player->s.skinnum;
-	player->sv.team = pl_skinnum.team_index;
+	if ( ra2->integer ) {
+		// the skinnum's team_index is 0 for everyone under RA2 (arena skins are
+		// per-team, but P_AssignClientSkinnum only fills team_index for CTF), so
+		// ask the round who is on whose side instead.
+		player->sv.team = RA2_TeamIndexForBots( player );
+	} else {
+		player_skinnum_t pl_skinnum;
+		pl_skinnum.skinnum = player->s.skinnum;
+		player->sv.team = pl_skinnum.team_index;
+	}
 
 	player->sv.buttons = player->client->buttons;
 

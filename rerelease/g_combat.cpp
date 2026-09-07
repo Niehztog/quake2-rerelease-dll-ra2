@@ -98,7 +98,12 @@ void Killed(edict_t *targ, edict_t *inflictor, edict_t *attacker, int damage, co
 		targ->monsterinfo.aiflags &= ~AI_MEDIC;
 	}
 
-	targ->enemy = attacker;
+	// RA2 -- do not let a self-kill overwrite this. targ->enemy is how
+	// ClientObituary's suicide branch finds the last *other* player who hurt
+	// this one (see the T_Damage hook below), and Killed() runs immediately
+	// before player_die() -> ClientObituary().
+	if (!ra2->integer || targ != attacker)
+		targ->enemy = attacker;
 	targ->lastMOD = mod;
 
 	// [Paril-KEX] monsters call die in their damage handler
@@ -269,7 +274,7 @@ static int CheckPowerArmor(edict_t *ent, const vec3_t &point, const vec3_t &norm
 }
 
 static int CheckArmor(edict_t *ent, const vec3_t &point, const vec3_t &normal, int damage, int te_sparks,
-					  damageflags_t dflags)
+					  damageflags_t dflags, edict_t *attacker)
 {
 	gclient_t *client;
 	int		   save;
@@ -309,12 +314,24 @@ static int CheckArmor(edict_t *ent, const vec3_t &point, const vec3_t &normal, i
 	if (!save)
 		return 0;
 
-	*power -= save;
+	// RA2 -- per-arena armor protection: a protected teammate's hit neither
+	// eats into your armor nor sparks (SpawnDamage below is fed `take`,
+	// not `save`; `save` is only ever used for the return value).
+	int take = save;
+	if (ra2->integer && client && OnSameTeam(ent, attacker) && !(dflags & DAMAGE_NO_PROTECTION))
+	{
+		if (arenas[client->resp.context].settings.armorprotect == 1)
+			take = 0;
+		else if (arenas[client->resp.context].settings.armorprotect == 2 && ent != attacker)
+			take = 0;
+	}
+
+	*power -= take;
 
 	if (!client && !ent->monsterinfo.armor_power)
 		ent->monsterinfo.armor_type = IT_NULL;
 
-	SpawnDamage(te_sparks, point, normal, save);
+	SpawnDamage(te_sparks, point, normal, take);
 
 	return save;
 }
@@ -495,6 +512,18 @@ bool OnSameTeam(edict_t *ent1, edict_t *ent2)
 	// monsters are never on our team atm
 	if (!ent1->client || !ent2->client)
 		return false;
+
+	// RA2 -- teamnum (0/1) is only meaningful within a single arena; two
+	// players never interact physically across different arenas, so this
+	// naive comparison (matching original RA2 exactly) never needs to
+	// also check resp.context. Unlike the stock/CTF checks below, RA2 does
+	// NOT special-case ent1==ent2: an entity trivially shares its own
+	// teamnum, so self-splash damage (e.g. rocket jumping) is treated as
+	// "on the same team" here too, exactly like the original -- callers
+	// that need to exclude self-damage (e.g. damage scoring) already do
+	// so explicitly via their own separate ent1 != ent2 checks.
+	if (ra2->integer)
+		return ent1->client->resp.teamnum == ent2->client->resp.teamnum;
 	// we're never on our own team
 	else if (ent1 == ent2)
 		return false;
@@ -538,6 +567,14 @@ void T_Damage(edict_t *targ, edict_t *inflictor, edict_t *attacker, const vec3_t
 	if (!targ->takedamage)
 		return;
 
+	// RA2 -- remember the last player who hurt you. RA2 adds this to T_Damage
+	// (vanilla only sets targ->enemy from Killed()/M_ReactToDamage), and
+	// ClientObituary's suicide branch reads it back to decide which announcer
+	// line the arena hears: how healthy the player you were fighting still is
+	// is what makes blowing yourself up embarrassing.
+	if (ra2->integer && attacker->client && attacker != targ)
+		targ->enemy = attacker;
+
 	if (g_instagib->integer && attacker->client && targ->client)
 	{
 		// [Kex] always kill no matter what on instagib
@@ -549,7 +586,9 @@ void T_Damage(edict_t *targ, edict_t *inflictor, edict_t *attacker, const vec3_t
 	// friendly fire avoidance
 	// if enabled you can't hurt teammates (but you can hurt yourself)
 	// knockback still occurs
-	if ((targ != attacker) && !(dflags & DAMAGE_NO_PROTECTION))
+	// RA2 -- skipped here; RA2 has its own per-arena healthprotect gating
+	// (applied later, after armor absorption) that replaces this check.
+	if (!ra2->integer && (targ != attacker) && !(dflags & DAMAGE_NO_PROTECTION))
 	{
 		// mark as friendly fire
 		if (OnSameTeam(targ, attacker))
@@ -687,12 +726,27 @@ void T_Damage(edict_t *targ, edict_t *inflictor, edict_t *attacker, const vec3_t
 		psave = CheckPowerArmor(targ, point, normal, take, dflags);
 		take -= psave;
 
-		asave = CheckArmor(targ, point, normal, take, te_sparks, dflags);
+		asave = CheckArmor(targ, point, normal, take, te_sparks, dflags, attacker);
 		take -= asave;
 	}
 
 	// treat cheat/powerup savings the same as armor
 	asave += save;
+
+	// RA2 -- a protected teammate hit is blocked entirely by the arena's
+	// healthprotect setting, returning before health/blood/pain are ever
+	// touched (armor absorption above still applies/sparks normally either way).
+	if (ra2->integer && OnSameTeam(targ, attacker) && !(dflags & DAMAGE_NO_PROTECTION))
+	{
+		const arena_settings_t &arena_settings = arenas[targ->client->resp.context].settings;
+
+		if (arena_settings.healthprotect == 1)
+			return;
+		if (arena_settings.healthprotect == 2 && targ != attacker)
+			return;
+
+		mod.friendly_fire = true;
+	}
 
 	// ZOID
 	// resistance tech
@@ -742,6 +796,21 @@ void T_Damage(edict_t *targ, edict_t *inflictor, edict_t *attacker, const vec3_t
 			}
 			else
 				SpawnDamage(te_sparks, point, normal, take);
+		}
+
+		// RA2 -- "damage scoring": 1pt per 100 damage dealt this life
+		// (armor absorption counts too), capped at 100 points per hit.
+		if (ra2->integer && targ->client && attacker->client && (attacker != targ) &&
+			!OnSameTeam(targ, attacker) && arenas[attacker->client->resp.context].settings.scorebydamage)
+		{
+			int points = std::max(std::min(targ->health, take), 0);
+			points += std::max(asave, 0);
+
+			if (points > 500)
+				points = 100;
+
+			attacker->client->resp.damagedealt += points;
+			attacker->client->resp.score = attacker->client->resp.damagedealt / 100;
 		}
 
 		if (!CTFMatchSetup())

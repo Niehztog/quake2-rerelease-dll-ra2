@@ -1,0 +1,28 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.aps
+
+# build intermediates (default IntDir is <project>/<Configuration>/)
+rerelease/Debug/
+rerelease/Release/
+rerelease/x64/
+rerelease/game/
+
+# build output (OutDir is one level above rerelease/)
+/game_x64.dll
+/game_x64.pdb
+/game_x64.exp
+/game_x64.lib
+/game_x64.ilk
+
+# Makefile build (Linux)
+/build/
+/game_x64.so
+
+# vcpkg manifest mode
+vcpkg_installed/
+
+# generated navigation intermediates
+*.aas

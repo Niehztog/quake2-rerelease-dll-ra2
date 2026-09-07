@@ -56,6 +56,12 @@
     <ClInclude Include="ctf\p_ctf_menu.h">
       <Filter>ctf</Filter>
     </ClInclude>
+    <ClInclude Include="rocketarena2\arena.h">
+      <Filter>rocketarena2</Filter>
+    </ClInclude>
+    <ClInclude Include="rocketarena2\ra2_menu.h">
+      <Filter>rocketarena2</Filter>
+    </ClInclude>
     <ClInclude Include="rogue\m_rogue_carrier.h">
       <Filter>rogue</Filter>
     </ClInclude>
@@ -150,6 +156,21 @@
     </ClCompile>
     <ClCompile Include="ctf\p_ctf_menu.cpp">
       <Filter>ctf</Filter>
+    </ClCompile>
+    <ClCompile Include="rocketarena2\arena.cpp">
+      <Filter>rocketarena2</Filter>
+    </ClCompile>
+    <ClCompile Include="rocketarena2\gslog.cpp">
+      <Filter>rocketarena2</Filter>
+    </ClCompile>
+    <ClCompile Include="rocketarena2\maploop.cpp">
+      <Filter>rocketarena2</Filter>
+    </ClCompile>
+    <ClCompile Include="rocketarena2\ra2_menu.cpp">
+      <Filter>rocketarena2</Filter>
+    </ClCompile>
+    <ClCompile Include="rocketarena2\ra2menus.cpp">
+      <Filter>rocketarena2</Filter>
     </ClCompile>
     <ClCompile Include="rogue\g_rogue_combat.cpp">
       <Filter>rogue</Filter>
@@ -254,6 +275,9 @@
     </Filter>
     <Filter Include="ctf">
       <UniqueIdentifier>{2b0fdaa0-3de9-4bbd-9bc6-3cadf798c291}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rocketarena2">
+      <UniqueIdentifier>{56138604-4e6e-4fc6-8bd6-0f3d9fe4a384}</UniqueIdentifier>
     </Filter>
     <Filter Include="rogue">
       <UniqueIdentifier>{76ef0be8-1c1d-472a-ada1-3aa1b354e022}</UniqueIdentifier>

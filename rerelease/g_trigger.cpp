@@ -39,6 +39,15 @@ void multi_trigger(edict_t *ent)
 	if (ent->nextthink)
 		return; // already been triggered
 
+	// RA2 -- an arena-entry trigger shows a dynamic "Go to Arena N (name)"
+	// centerprint/message instead of a fixed map-authored one
+	if (ra2->integer && RA2_IsPlayableArena(ent->arena))
+	{
+		if (ent->message)
+			gi.TagFree((void *) ent->message);
+		ent->message = G_CopyString(G_Fmt("Go to Arena {} ({})", ent->arena, getarenaname(ent->arena)).data(), TAG_LEVEL);
+	}
+
 	G_UseTargets(ent, ent->activator);
 
 	if (ent->wait > 0)

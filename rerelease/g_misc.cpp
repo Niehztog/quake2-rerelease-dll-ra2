@@ -2084,13 +2084,16 @@ void SP_misc_teleporter(edict_t *ent)
 	gi.linkentity(ent);
 	
 	// N64 has some of these for visual effects
-	if (!ent->target)
+	// RA2 -- an arena-tagged teleporter pad is still built even with no
+	// target, since its destination is resolved via AddtoArena instead
+	if (!ent->target && !(ra2->integer && ent->arena > 0))
 		return;
 
 	trig = G_Spawn();
-	trig->touch = teleporter_touch;
+	trig->touch = ra2->integer ? ra2_teleporter_touch : teleporter_touch;
 	trig->solid = SOLID_TRIGGER;
 	trig->target = ent->target;
+	trig->arena = ent->arena; // RA2
 	trig->owner = ent;
 	trig->s.origin = ent->s.origin;
 	trig->mins = { -8, -8, 8 };
@@ -2113,6 +2116,18 @@ void SP_misc_teleporter_dest(edict_t *ent)
 	//	ent->s.effects |= EF_FLIES;
 	ent->mins = { -32, -32, -24 };
 	ent->maxs = { 32, 32, -16 };
+
+	// RA2 sets the model and then keeps it to itself: SVF_NOCLIENT and
+	// SOLID_NOT in its own SP_misc_teleporter_dest. Every deathmatch spawn
+	// point routes through here (SP_info_player_deathmatch), and an arena is
+	// nothing but spawn points, so leaving them visible litters the map with
+	// pads and leaving them solid puts a step under every one.
+	if (ra2->integer)
+	{
+		ent->svflags |= SVF_NOCLIENT;
+		ent->solid = SOLID_NOT;
+	}
+
 	gi.linkentity(ent);
 }
 

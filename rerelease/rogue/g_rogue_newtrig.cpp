@@ -118,7 +118,7 @@ void SP_trigger_teleport(edict_t *self)
 			self->delay = 1;
 	}
 
-	self->touch = trigger_teleport_touch;
+	self->touch = ra2->integer ? ra2_teleporter_touch : trigger_teleport_touch; // RA2
 
 	self->solid = SOLID_TRIGGER;
 	self->movetype = MOVETYPE_NONE;

@@ -853,7 +853,9 @@ void SV_Physics_Step(edict_t *ent)
 		if (ent->groundentity)
 			if (!wasonground)
 				if (hitsound)
-					ent->s.event = EV_FOOTSTEP;
+					// RA2 -- spectating/dead clients don't play a footstep on landing
+					if (!ra2->integer || !ent->client || ent->client->resp.fightstate == FIGHT_ALIVE)
+						ent->s.event = EV_FOOTSTEP;
 	}
 
 	if (!ent->inuse) // PGM g_touchtrigger free problem

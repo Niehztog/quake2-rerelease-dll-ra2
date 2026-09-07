@@ -3,6 +3,7 @@
 
 #include "g_local.h"
 #include "bots/bot_includes.h"
+#include "rocketarena2/arena.h"
 
 CHECK_GCLIENT_INTEGRITY;
 CHECK_EDICT_INTEGRITY;
@@ -173,9 +174,39 @@ void PreInitGame()
 	coop = gi.cvar("coop", "0", CVAR_LATCH);
 	teamplay = gi.cvar("teamplay", "0", CVAR_LATCH);
 
+	// RA2
+	// registered here (rather than arena_init()'s worldspawn-time call,
+	// which still runs the same gi.cvar() call guarded by `if (!ra2)`) so
+	// the pointer is already valid for the forcing checks below.
+	//
+	// defaulted on, because this build is the RA2 port and the rerelease
+	// gives a mod no other way in. Its Game Mode list is four entries
+	// built inline in the engine's own launcher menu, game_export_t has no
+	// gamemode hook, and no data file feeds that list, so the only way for
+	// the menu to start Rocket Arena is for Deathmatch to already mean it.
+	// The menu writes coop/teamplay/deathmatch/ctf and never touches ra2.
+	// `+set ra2 0` still gets stock deathmatch.
+	ra2 = gi.cvar("ra2", "1", CVAR_SERVERINFO | CVAR_LATCH);
+	// RA2
+
 	// ZOID
 	CTFInit();
 	// ZOID
+
+	// RA2
+	// with ra2 defaulted on, a stock ruleset has to be able to say so.
+	// The menu's Cooperative, Capture the Flag and Team Deathmatch rows
+	// each set their own cvar, and those beat the default -- which is the
+	// reverse of the precedence below, where ra2 wins. An explicit
+	// `+set ra2 1` alongside one of them loses too; nothing distinguishes
+	// it from the default at this point.
+	//
+	// ra2 is read as a cvar everywhere past here, so it is the cvar that
+	// has to change, and CVAR_LATCH would make cvar_set defer the write
+	// past the checks below. cvar_forceset is what applies it in time.
+	if (ra2->integer && (coop->integer || ctf->integer || teamplay->integer))
+		gi.cvar_forceset("ra2", "0");
+	// RA2
 
 	// ZOID
 	// This gamemode only supports deathmatch
@@ -205,6 +236,28 @@ void PreInitGame()
 			gi.cvar_set("coop", "0");
 	}
 	// ZOID
+
+	// RA2
+	// this gamemode only supports deathmatch, and is mutually exclusive
+	// with CTF/teamplay
+	if (ra2->integer)
+	{
+		if (!deathmatch->integer)
+		{
+			gi.Com_Print("Forcing deathmatch.\n");
+			gi.cvar_set("deathmatch", "1");
+		}
+		// force coop off
+		if (coop->integer)
+			gi.cvar_set("coop", "0");
+		// force ctf off
+		if (ctf->integer)
+			gi.cvar_set("ctf", "0");
+		// force tdm off
+		if (teamplay->integer)
+			gi.cvar_set("teamplay", "0");
+	}
+	// RA2
 }
 
 /*
@@ -352,6 +405,11 @@ void InitGame()
 	g_map_list_shuffle = gi.cvar("g_map_list_shuffle", "0", CVAR_NOFLAGS);
 	g_lag_compensation = gi.cvar("g_lag_compensation", "1", CVAR_NOFLAGS);
 
+	// RA2 -- local match-activity text log; self-gates on the "logfile"
+	// cvar it registers internally
+	if (ra2->integer)
+		GSLogStartup();
+
 	// items
 	InitItems();
 
@@ -366,6 +424,7 @@ void InitGame()
 	// initialize all clients for this game
 	game.maxclients = maxclients->integer;
 	game.clients = (gclient_t *) gi.TagMalloc(game.maxclients * sizeof(game.clients[0]), TAG_GAME);
+	G_ConstructClientStorage(game.clients, game.maxclients);
 	globals.num_edicts = game.maxclients + 1;
 
 	//======
@@ -385,6 +444,22 @@ void InitGame()
 void ShutdownGame()
 {
 	gi.Com_Print("==== ShutdownGame ====\n");
+
+	// RA2
+	if (ra2->integer)
+		GSLogShutdown();
+	// RA2
+
+	arena_shutdown();
+
+	// same order as SpawnEntities: the menus have to be freed while their
+	// TAG_LEVEL blocks are still there, or the std::strings inside them leak
+	if (ra2->integer && game.clients)
+		for (uint32_t i = 0; i < game.maxclients; i++)
+			free_client_menus(&game.clients[i]);
+
+	G_DestroyClientStorage(game.clients, game.maxclients);
+	game.clients = nullptr;
 
 	gi.FreeTags(TAG_LEVEL);
 	gi.FreeTags(TAG_GAME);
@@ -736,6 +811,20 @@ void ExitLevel()
 	level.exitintermission = 0;
 	level.intermissiontime = 0_ms;
 
+	// RA2 -- reset every connected client's per-round respawn state
+	// (team assignment, fight/observer mode, vote budget, etc.) before
+	// the next map's arenas are (re)initialized from scratch.
+	if (ra2->integer)
+	{
+		for (auto player : active_players())
+		{
+			if (player->health > player->client->pers.max_health)
+				player->health = player->client->pers.max_health;
+			InitClientResp(player->client);
+		}
+	}
+
+
 	// [Paril-KEX] support for intermission completely wiping players
 	// back to default stuff
 	if (level.intermission_clear)
@@ -950,6 +1039,9 @@ inline void G_RunFrame_(bool main_loop)
 
 	// see if it is time to end a deathmatch
 	CheckDMRules();
+
+	if (ra2->integer)
+		multi_arena_think();
 
 	// see if needpass needs updated
 	CheckNeedPass();

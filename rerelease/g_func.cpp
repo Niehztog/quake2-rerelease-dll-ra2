@@ -3001,3 +3001,16 @@ void SP_func_eye(edict_t *ent)
 
 	gi.linkentity(ent);
 }
+
+/*QUAKED func_illusionary (0 .5 .8) ?
+A bmodel that is visible but not solid, and never moves. Used for RA2
+decorative geometry (e.g. arena-only set dressing) as well as general map
+content; not gated behind ra2->integer since it has no gameplay behavior.
+*/
+void SP_func_illusionary(edict_t *ent)
+{
+	ent->movetype = MOVETYPE_NONE;
+	ent->solid = SOLID_NOT;
+	gi.setmodel(ent, ent->model);
+	gi.linkentity(ent);
+}

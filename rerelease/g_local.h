@@ -4,6 +4,8 @@
 // g_local.h -- local definitions for game module
 #pragma once
 
+#include <new>
+
 #include "bg_local.h"
 
 // the "gameversion" client command will print this plus compile date
@@ -2533,7 +2535,7 @@ void fire_nuke(edict_t *self, const vec3_t &start, const vec3_t &aimdir, int spe
 bool fire_player_melee(edict_t *self, const vec3_t &start, const vec3_t &aim, int reach, int damage, int kick, mod_t mod);
 void fire_tesla(edict_t *self, const vec3_t &start, const vec3_t &aimdir, int damage, int speed);
 void fire_blaster2(edict_t *self, const vec3_t &start, const vec3_t &aimdir, int damage, int speed, effects_t effect,
-				   bool hyper);
+				   bool is_hyper);
 void fire_heatbeam(edict_t *self, const vec3_t &start, const vec3_t &aimdir, const vec3_t &offset, int damage, int kick,
 				   bool monster);
 void fire_tracker(edict_t *self, const vec3_t &start, const vec3_t &dir, int damage, int speed, edict_t *enemy);
@@ -2651,6 +2653,11 @@ constexpr spawnflags_t SPAWNFLAG_LANDMARK_KEEP_Z = 1_spawnflag;
 #include "ctf/g_ctf.h"
 #include "ctf/p_ctf_menu.h"
 // ZOID
+
+// RA2
+#include "rocketarena2/ra2_menu.h"
+#include "rocketarena2/arena.h"
+// RA2
 //============================================================================
 
 // client_t->anim_priority
@@ -2759,6 +2766,9 @@ struct client_persistant_t
 	bool spectator; // client wants to be a spectator
 	bool bob_skip; // [Paril-KEX] client wants no movement bob
 
+	// RA2
+	bool showmotd; // whether init_player still needs to show the motd menu
+
 	// [Paril-KEX] fog that we want to achieve; density rgb skyfogfactor
 	std::array<float, 5> wanted_fog;
 	height_fog_t wanted_heightfog;
@@ -2794,6 +2804,22 @@ struct client_respawn_t
 	bool	 admin;
 	ghost_t *ghost; // for ghost codes
 					// ZOID
+
+	// RA2 -- per-round/per-life state, reset on every (re)spawn like the
+	// rest of client_respawn_t.
+	int32_t  teamnum;			// which team within the arena (0/1)
+	int32_t  fightstate;		// fightstate_t -- spectating/alive/dead this round
+	int32_t  context;			// which arena this client belongs to, -1 if none
+	qmenu_t  teammember;		// intrusive node linking this client into teams[teamnum]
+	gtime_t  spawn_recheck;	// time deadline to recheck spawn-point overlap (deferred telefrag)
+	int32_t  omode;			// observer_mode_t
+	bool     entered;			// has this client entered a live arena at least once
+	edict_t *track_target;		// entity this observer is currently tracking
+	int32_t  omode_buttons;		// latched buttons while cycling observer sub-modes
+	int32_t  lastomode;			// previous observer_mode_t, restored after a menu closes
+	bool     ra2_voted;			// voted in the current RA2 admin poll (distinct from CTF's election 'voted' above)
+	int32_t  votes;				// number of eligible voters snapshotted when a poll started
+	int32_t  damagedealt;		// damage dealt this life, used for scorebydamage arenas
 };
 
 // [Paril-KEX] seconds until we are fully invisible after
@@ -2952,6 +2978,28 @@ struct gclient_t
 	gtime_t		ctf_lasttechmsg;
 	// ZOID
 
+	// RA2 -- persists across respawns like the rest of gclient_t (only
+	// cleared on a fresh PutClientInServer, not per-life). ctf_grapple/
+	// ctf_grapplestate/ctf_grapplereleasetime above are reused directly
+	// for RA2's own offhand hook, no separate copies needed.
+	int32_t  scoremode;			// which scoreboard page is up: 0 none, 1 this arena's own page
+								// (arena or pickup), 2 serverwide. Cycled by Cmd_Score_f, and
+								// what showscores follows under RA2
+	bool     hookbutton;		// +hook button currently held
+	gtime_t  menuusetime;		// rate-limits invuse while a menu is open
+	qmenu_t  menuqueue;			// sentinel head of this client's own menu stack
+	qmenu_t *curmenulink;		// the currently displayed menu's own queue node
+	qmenu_t *selected;			// the currently highlighted item's node
+	bool	 showmenu;			// is curmenulink actually on screen? RA2 keeps a menu loaded
+								// while it is hidden, so TAB can toggle the same screen back
+								// (see Cmd_Inven_f) and the item keys go back to being item
+								// keys in the meantime
+	uint32_t menugen;			// bumped every time curmenulink changes, so a caller that
+								// dispatched into a select callback can tell the callback
+								// replaced the screen even when TagMalloc handed back the
+								// freed menu's own address (see UseMenu)
+	std::string menutext; // rendered svc_layout program last sent for the current menu/statusbar, so DisplayMenu can skip resending unchanged content
+
 	// used for player trails.
 	edict_t *trail_head, *trail_tail;
 	// whether to use weapon chains
@@ -3008,6 +3056,23 @@ struct gclient_t
 	gtime_t	 last_firing_time;
 };
 
+// The game allocator returns raw storage, while gclient_t now owns RA2 menu
+// text and therefore must be explicitly constructed and destroyed.
+inline void G_ConstructClientStorage(gclient_t *clients, size_t count)
+{
+	for (size_t i = 0; i < count; ++i)
+		::new (static_cast<void *>(clients + i)) gclient_t{};
+}
+
+inline void G_DestroyClientStorage(gclient_t *clients, size_t count)
+{
+	if (!clients)
+		return;
+
+	for (size_t i = count; i-- > 0;)
+		clients[i].~gclient_t();
+}
+
 // ==========================================
 // PLAT 2
 // ==========================================
@@ -3058,6 +3123,15 @@ struct edict_t
 	int32_t spawn_count; // [Paril-KEX] used to differentiate different entities that may be in the same slot
 	movetype_t	movetype;
 	ent_flags_t flags;
+
+	// RA2 -- which arena this entity belongs to (spawn points, teleporters,
+	// arena-entry triggers). 0, not -1, for an entity the map did not tag:
+	// arena 0 is the staging area every client starts in, and both the spawn
+	// point search (SelectRandomArenaSpawnPoint) and the arena-entry tests
+	// (multi_trigger, ra2_teleporter_touch, SP_misc_teleporter) are written
+	// against that. Every edict is memset in SpawnEntities, so 0 is also what
+	// they actually get; this initialiser only keeps the two in step.
+	int32_t arena = 0;
 
 	const char *model;
 	gtime_t		freetime; // sv.time when the object was freed
@@ -3540,7 +3614,7 @@ struct fmt::formatter<edict_t>
 	}
 
     template<typename FormatContext>
-    auto format(const edict_t &p, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const edict_t &p, FormatContext &ctx) const -> decltype(ctx.out())
     {
 		if (p.linked)
 			return fmt::format_to(ctx.out(), FMT_STRING("{} @ {}"), p.classname, (p.absmax + p.absmin) * 0.5f);

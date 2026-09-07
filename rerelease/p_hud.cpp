@@ -2,6 +2,8 @@
 // Licensed under the GNU General Public License 2.0.
 #include "g_local.h"
 #include "g_statusbar.h"
+#include "rocketarena2/arena.h"
+#include "rocketarena2/ra2_menu.h"
 
 /*
 ======================================================================
@@ -11,7 +13,25 @@ INTERMISSION
 ======================================================================
 */
 
+constexpr size_t MAX_SCOREBOARD_SIZE = 1024;
+
 void DeathmatchScoreboard(edict_t *ent);
+
+namespace
+{
+	[[nodiscard]] bool RA2_AppendLayout(std::string &layout, const std::string &entry)
+	{
+		if ((layout.length() + entry.length()) > MAX_SCOREBOARD_SIZE)
+			return false;
+
+		layout += entry;
+		return true;
+	}
+}
+
+void Serverwide_ScoreboardMessage(edict_t *ent);
+void Arena_ScoreboardMessage(edict_t *ent);
+void Pickup_ScoreboardMessage(edict_t *ent);
 
 void MoveClientToIntermission(edict_t *ent)
 {
@@ -20,6 +40,11 @@ void MoveClientToIntermission(edict_t *ent)
 		ent->s.event = EV_OTHER_TELEPORT;
 	if (deathmatch->integer)
 		ent->client->showscores = true;
+	if (ra2->integer)
+	{
+		clear_menus(ent);
+		ent->client->scoremode = 2;
+	}
 	ent->s.origin = level.intermission_origin;
 	ent->client->ps.pmove.origin = level.intermission_origin;
 	ent->client->ps.viewangles = level.intermission_angle;
@@ -268,6 +293,7 @@ void G_ReportMatchDetails(bool is_end)
 void BeginIntermission(edict_t *targ)
 {
 	edict_t *ent, *client;
+	int32_t count = 0;
 
 	if (level.intermissiontime)
 		return; // already activated
@@ -392,11 +418,325 @@ void BeginIntermission(edict_t *targ)
 		client = g_edicts + 1 + i;
 		if (!client->inuse)
 			continue;
+		count++;
 		MoveClientToIntermission(client);
 	}
+
+	if (ra2->integer && !count)
+		level.exitintermission = 1;
 }
 
-constexpr size_t MAX_SCOREBOARD_SIZE = 1024;
+/*
+==================
+Serverwide_ScoreboardMessage
+
+==================
+*/
+void Serverwide_ScoreboardMessage(edict_t *ent)
+{
+	std::string entry, line, layout;
+	int32_t sorted[MAX_CLIENTS];
+	int32_t sortedscores[MAX_CLIENTS];
+	int32_t total = 0;
+
+	for (uint32_t i = 0; i < game.maxclients; i++)
+	{
+		auto *cl_ent = g_edicts + 1 + i;
+		if (!cl_ent->inuse)
+			continue;
+
+		int32_t score = game.clients[i].resp.score;
+		uint32_t j = 0;
+		for (; j < (uint32_t) total; j++)
+			if (score > sortedscores[j])
+				break;
+
+		for (int32_t k = total; k > (int32_t) j; k--)
+		{
+			sorted[k] = sorted[k - 1];
+			sortedscores[k] = sortedscores[k - 1];
+		}
+
+		sorted[j] = i;
+		sortedscores[j] = score;
+		total++;
+	}
+
+	// the header, then the hairline rule the original ruled under it. RA2 wrote
+	// that rule as 37 bytes of 0x9b through string2, which XORs 0x80 back off
+	// and lands on charset glyph 0x1b -- an 8x1 bar along the *top* of its cell.
+	// Kex reads layout strings as UTF-8, so a byte over 0x7f cannot be spelled
+	// here any more; '_' is the same 8x1 bar along the *bottom* of its cell, so
+	// drawing it seven pixels higher puts the line back on the original's row.
+	if (!RA2_AppendLayout(layout, "xv 0 yv 32 string2 \"Frags Ping   Name        Team       A\" "
+								  "xv 0 yv 33 string \"_____________________________________\" "))
+		return;
+
+	if (total > 23)
+		total = 23;
+
+	for (int32_t i = 0; i < total; i++)
+	{
+		auto *cl = &game.clients[sorted[i]];
+		auto *cl_ent = g_edicts + 1 + sorted[i];
+		const char *teamname = "None";
+
+		if (cl->resp.teamnum > -1 && cl->resp.teamnum < MAX_TEAMS && teams[cl->resp.teamnum].it)
+			teamname = TEAM(&teams[cl->resp.teamnum])->name.c_str();
+
+		char buffer[128];
+		std::snprintf(buffer, sizeof(buffer), "%3d %4d %12.12s %12.12s %1d",
+			cl->resp.score, cl->ping, RA2_PlayerName(cl_ent).c_str(), teamname, cl->resp.context);
+		line = buffer;
+
+		// the viewing player's own row draws plain, everyone else's in the alternate
+		// charset. Kex reads strings as UTF-8, so shifting bytes up by 0x80 can't
+		// express this any more -- the layout command carries the colour instead.
+		entry = G_Fmt("xv 8 yv {} {} \"{}\" ", i * 8 + 48, (cl_ent == ent) ? "string" : "string2", line);
+		if (!RA2_AppendLayout(layout, entry))
+			break;
+	}
+
+	gi.WriteByte(svc_layout);
+	gi.WriteString(layout.c_str());
+}
+
+/*
+==================
+Arena_ScoreboardMessage
+
+==================
+*/
+void Arena_ScoreboardMessage(edict_t *ent)
+{
+	std::string entry, line, layout;
+	int32_t sortedteams[MAX_TEAMS];
+	int32_t teamscores[MAX_TEAMS];
+	int32_t teampings[MAX_TEAMS];
+	int32_t sortedplayers[MAX_CLIENTS];
+	int32_t playerscores[MAX_CLIENTS];
+	int32_t total = 0;
+	int32_t arenanum = ent->client->resp.context;
+
+	for (int32_t i = 0; i < MAX_TEAMS; i++)
+	{
+		auto *t = teams[i].it ? TEAM(&teams[i]) : nullptr;
+		if (!t || t->arenanum != arenanum || t->outofline)
+			continue;
+
+		int32_t score = 0;
+		int32_t ping = 0;
+		int32_t count = 0;
+
+		for (qmenu_t *node = teams[i].next; node; node = node->next)
+		{
+			auto *cl_ent = static_cast<edict_t *>(node->it);
+			score += cl_ent->client->resp.score;
+			ping += cl_ent->client->ping;
+			count++;
+		}
+
+		if (!count)
+			continue;
+
+		ping /= count;
+
+		int32_t j = 0;
+		for (; j < total; j++)
+			if (score > teamscores[j])
+				break;
+
+		for (int32_t k = total; k > j; k--)
+		{
+			sortedteams[k] = sortedteams[k - 1];
+			teamscores[k] = teamscores[k - 1];
+			teampings[k] = teampings[k - 1];
+		}
+
+		sortedteams[j] = i;
+		teamscores[j] = score;
+		teampings[j] = ping;
+		total++;
+	}
+
+	if (!RA2_AppendLayout(layout, "xv 0 yv 40 string2 \"Teams\" xv 160 string2 \"Players\" "))
+		return;
+
+	int32_t row = 1;
+	if (total > 20)
+		total = 20;
+
+	for (int32_t i = 0; i < total; i++)
+	{
+		auto *t = TEAM(&teams[sortedteams[i]]);
+
+		char buffer[128];
+		std::snprintf(buffer, sizeof(buffer), "%-2d %-3d %.11s", teamscores[i], teampings[i], t->name.c_str());
+		line = buffer;
+
+		// a team that's fighting draws plain, the ones waiting in the alternate charset
+		entry = G_Fmt("xv 0 yv {} {} \"{}\" ", row * 8 + 40, t->fighting ? "string" : "string2", line);
+		if (!RA2_AppendLayout(layout, entry))
+			break;
+
+		int32_t totalplayers = 0;
+		for (qmenu_t *node = static_cast<qmenu_t *>(t->arenalink.it)->next; node; node = node->next)
+		{
+			auto *cl_ent = static_cast<edict_t *>(node->it);
+			int32_t score = cl_ent->client->resp.score;
+			int32_t j = 0;
+
+			for (; j < totalplayers; j++)
+				if (score > playerscores[j])
+					break;
+
+			for (int32_t k = totalplayers; k > j; k--)
+			{
+				sortedplayers[k] = sortedplayers[k - 1];
+				playerscores[k] = playerscores[k - 1];
+			}
+
+			sortedplayers[j] = static_cast<int32_t>(cl_ent - g_edicts - 1);
+			playerscores[j] = score;
+			totalplayers++;
+		}
+
+		if (totalplayers > 20)
+			totalplayers = 20;
+
+		for (int32_t j = 0; j < totalplayers; j++)
+		{
+			auto *cl_ent = g_edicts + 1 + sortedplayers[j];
+			auto *cl = &game.clients[sortedplayers[j]];
+
+			std::snprintf(buffer, sizeof(buffer), "%-2d %-3d %.11s", cl->resp.score, cl->ping,
+				RA2_PlayerName(cl_ent).c_str());
+			line = buffer;
+
+			// a live fighter draws plain, the dead and the audience in the alternate charset
+			entry = G_Fmt("xv 160 yv {} {} \"{}\" ", row * 8 + 40, cl_ent->takedamage ? "string" : "string2", line);
+			if (!RA2_AppendLayout(layout, entry))
+				break;
+			row++;
+		}
+	}
+
+	gi.WriteByte(svc_layout);
+	gi.WriteString(layout.c_str());
+}
+
+/*
+==================
+Pickup_ScoreboardMessage
+
+==================
+*/
+void Pickup_ScoreboardMessage(edict_t *ent)
+{
+	std::string entry, layout;
+	int32_t scores[MAX_CLIENTS];
+	int32_t redsorted[MAX_CLIENTS];
+	int32_t bluesorted[MAX_CLIENTS];
+	int32_t redtotal = 0, bluetotal = 0;
+	int32_t redwins = 0, bluewins = 0;
+
+	for (uint32_t i = 0; i < game.maxclients; i++)
+	{
+		auto *cl_ent = g_edicts + 1 + i;
+		if (!cl_ent->inuse || cl_ent->client->resp.context != ent->client->resp.context || cl_ent->client->resp.teamnum < 0)
+			continue;
+		if (TEAM(&teams[cl_ent->client->resp.teamnum])->side)
+			continue;
+
+		int32_t score = game.clients[i].resp.score;
+		uint32_t j = 0;
+		for (; j < (uint32_t) redtotal; j++)
+			if (score > scores[j])
+				break;
+		for (int32_t k = redtotal; k > (int32_t) j; k--)
+		{
+			redsorted[k] = redsorted[k - 1];
+			scores[k] = scores[k - 1];
+		}
+		redsorted[j] = i;
+		scores[j] = score;
+		redwins = TEAM(&teams[cl_ent->client->resp.teamnum])->wins;
+		redtotal++;
+	}
+
+	for (uint32_t i = 0; i < game.maxclients; i++)
+	{
+		auto *cl_ent = g_edicts + 1 + i;
+		if (!cl_ent->inuse || cl_ent->client->resp.context != ent->client->resp.context || cl_ent->client->resp.teamnum < 0)
+			continue;
+		if (TEAM(&teams[cl_ent->client->resp.teamnum])->side != 1)
+			continue;
+
+		int32_t score = game.clients[i].resp.score;
+		uint32_t j = 0;
+		for (; j < (uint32_t) bluetotal; j++)
+			if (score > scores[j])
+				break;
+		for (int32_t k = bluetotal; k > (int32_t) j; k--)
+		{
+			bluesorted[k] = bluesorted[k - 1];
+			scores[k] = scores[k - 1];
+		}
+		bluesorted[j] = i;
+		scores[j] = score;
+		bluewins = TEAM(&teams[cl_ent->client->resp.teamnum])->wins;
+		bluetotal++;
+	}
+
+	redwins = std::max(redwins, 0);
+	bluewins = std::max(bluewins, 0);
+	layout = G_Fmt("xv 0 yv 40 string2 \"Team Red  : {}\" xv 160 yv 40 string2 \"Team Blue : {}\" ", redwins, bluewins);
+
+	if (redtotal > 20)
+		redtotal = 20;
+	if (bluetotal > 20)
+		bluetotal = 20;
+
+	// RA2 coloured only the name on this board: HiPrint/LoPrint were handed the
+	// netname on its own, so the score and ping columns stayed in the alternate
+	// charset whatever the player was doing, and just the name went plain while
+	// they were alive. Reaching only the name needs a second draw command per
+	// player here, roughly 60 more bytes of MAX_SCOREBOARD_SIZE per row, so a
+	// board fuller than about 7-a-side loses its last rows to the cap.
+	const auto append_player = [&](int32_t x, int32_t y, int32_t clientnum) -> bool
+	{
+		auto *cl = &game.clients[clientnum];
+		auto *cl_ent = g_edicts + 1 + clientnum;
+
+		char cols[16];
+		std::snprintf(cols, sizeof(cols), "%2d %3d", cl->resp.score, cl->ping);
+
+		char name[16];
+		std::snprintf(name, sizeof(name), "%.12s", RA2_PlayerName(cl_ent).c_str());
+
+		// the name sits one space past the columns, where the single
+		// "%2d %3d %.12s" the original formatted would have placed it
+		const int32_t name_x = x + 8 * (int32_t) (strlen(cols) + 1);
+
+		// both halves in one entry, so the cap can never leave a row's columns
+		// standing without the name they belong to
+		entry = G_Fmt("xv {} yv {} string2 \"{}\" xv {} yv {} {} \"{}\" ",
+			x, y, cols, name_x, y, cl_ent->takedamage ? "string" : "string2", name);
+		return RA2_AppendLayout(layout, entry);
+	};
+
+	for (int32_t i = 0, y = 48; i < redtotal || i < bluetotal; i++, y += 8)
+	{
+		if (i < redtotal && !append_player(0, y, redsorted[i]))
+			break;
+
+		if (i < bluetotal && !append_player(160, y, bluesorted[i]))
+			break;
+	}
+
+	gi.WriteByte(svc_layout);
+	gi.WriteString(layout.c_str());
+}
 
 /*
 ==================
@@ -415,6 +755,24 @@ void DeathmatchScoreboardMessage(edict_t *ent, edict_t *killer)
 	gclient_t  *cl;
 	edict_t	*cl_ent;
 	const char *tag;
+
+	if (ra2->integer)
+	{
+		if (!ent->client->resp.context && ent->client->scoremode == 1)
+			ent->client->scoremode = 2;
+
+		if (ent->client->scoremode == 2)
+		{
+			Serverwide_ScoreboardMessage(ent);
+			return;
+		}
+
+		if (arenas[ent->client->resp.context].idarena)
+			Pickup_ScoreboardMessage(ent);
+		else
+			Arena_ScoreboardMessage(ent);
+		return;
+	}
 
 	// ZOID
 	if (G_TeamplayEnabled())
@@ -538,7 +896,11 @@ Note that it isn't that hard to overflow the 1400 byte message limit!
 void DeathmatchScoreboard(edict_t *ent)
 {
 	DeathmatchScoreboardMessage(ent, ent->enemy);
-	gi.unicast(ent, true);
+
+	if (ra2->integer)
+		gi.unicast(ent, ent->client->scoremode == 2);
+	else
+		gi.unicast(ent, true);
 	ent->client->menutime = level.time + 3_sec;
 }
 
@@ -566,6 +928,40 @@ void Cmd_Score_f(edict_t *ent)
 
 	if (!deathmatch->integer && !coop->integer)
 		return;
+
+	if (ra2->integer)
+	{
+		// RA2's cycle. 2 always steps back to 0, which is the "no board" end
+		// of it; from anywhere else the lobby (context 0) jumps straight to 2,
+		// since arena 0 has no arena page of its own, while a real arena steps
+		// up through 1 -- its own arena or pickup page -- to reach 2. So a
+		// player in an arena sees arena, serverwide, nothing, and one in the
+		// lobby just toggles serverwide on and off.
+		if (ent->client->scoremode == 2)
+			ent->client->scoremode = 0;
+		else if (!ent->client->resp.context)
+			ent->client->scoremode = 2;
+		else
+			ent->client->scoremode++;
+
+		// scoremode 0 is "no board", which is how the cycle ends -- the original
+		// read scoremode straight into STAT_LAYOUTS, where the rerelease reads
+		// showscores, so the flag has to follow the mode or the last board would
+		// stay on screen until something else cleared it.
+		if (ent->client->scoremode)
+		{
+			// one layout channel, so a board and a menu cannot both be up: park
+			// the menu on its stack and let TAB bring it back.
+			ent->client->showmenu = false;
+			ent->client->showscores = true;
+			DeathmatchScoreboard(ent);
+		}
+		else
+		{
+			DisplayMenu(ent);
+		}
+		return;
+	}
 
 	if (ent->client->showscores)
 	{
@@ -671,6 +1067,8 @@ void Cmd_Help_f(edict_t *ent)
 
 	ent->client->showinventory = false;
 	ent->client->showscores = false;
+	if (ra2->integer)
+		ent->client->scoremode = 0;
 
 	if (ent->client->showhelp &&
 			(ent->client->pers.game_help1changed == game.help1changed ||
@@ -738,7 +1136,9 @@ void G_SetStats(edict_t *ent)
 	//
 	// health
 	//
-	if (ent->s.renderfx & RF_USE_DISGUISE)
+	if (ra2->integer)
+		ent->client->ps.stats[STAT_HEALTH_ICON] = GetSkinIcon(ent);
+	else if (ent->s.renderfx & RF_USE_DISGUISE)
 		ent->client->ps.stats[STAT_HEALTH_ICON] = level.disguise_icon;
 	else
 		ent->client->ps.stats[STAT_HEALTH_ICON] = level.pic_health;
@@ -947,7 +1347,19 @@ void G_SetStats(edict_t *ent)
 
 	if (deathmatch->integer)
 	{
-		if (ent->client->pers.health <= 0 || level.intermissiontime || ent->client->showscores)
+		if (ra2->integer)
+		{
+			// RA2 owns this channel outright, and RA2_LayoutFlag is the one rule
+			// for it -- including at intermission, whose board is scoremode 2
+			// (MoveClientToIntermission) and must not be putaway-able either.
+			// The stock dead-player term is dead code here: pers.health is only
+			// written by InitClientPersistant/PutClientInServer/SaveClientData
+			// and stays 100 for an RA2 client's whole life. A dying fighter gets
+			// its board from player_die -> Cmd_Help_f -> Cmd_Score_f, which sets
+			// scoremode, so RA2_LayoutFlag already covers it.
+			ent->client->ps.stats[STAT_LAYOUTS] |= RA2_LayoutFlag(ent);
+		}
+		else if (ent->client->pers.health <= 0 || level.intermissiontime || ent->client->showscores)
 			ent->client->ps.stats[STAT_LAYOUTS] |= LAYOUTS_LAYOUT;
 		if (ent->client->showinventory && ent->client->pers.health > 0)
 			ent->client->ps.stats[STAT_LAYOUTS] |= LAYOUTS_INVENTORY;
@@ -1081,9 +1493,64 @@ void G_SetStats(edict_t *ent)
 		}
 	}
 
-	// ZOID
-	SetCTFStats(ent);
-	// ZOID
+	if (ra2->integer)
+	{
+		ent->client->ps.stats[STAT_RA2_SKIN_ICON] = ent->client->ps.stats[STAT_HEALTH_ICON];
+
+		//
+		// join queue
+		//
+		if (!ent->client->resp.context)
+		{
+			// back in the staging area: nothing here belongs to an arena any
+			// more. Without this the countdown, the "Red vs Blue" line and the
+			// queue counters of whichever arena this player last stood in
+			// would sit on their HUD for the rest of the map. STAT_RA2_ROUNDINFO
+			// needs no clearing of its own -- the statusbar only draws it
+			// inside the STAT_RA2_COUNTDOWN gate.
+			ent->client->ps.stats[STAT_RA2_COUNTDOWN] = 0;
+			ent->client->ps.stats[STAT_RA2_ARENASTATUS] = 0;
+			ent->client->ps.stats[STAT_RA2_SHOWQUEUE] = 0;
+			ent->client->ps.stats[STAT_RA2_LINEPOSITION] = 0;
+		}
+		else if (arenas[ent->client->resp.context].idarena)
+		{
+			// a pickup arena's two standing sides, Red then Blue. Mid-round the
+			// counters are how many of each side are still standing; between
+			// rounds they are how many have signed up.
+			const arena_t &arena = arenas[ent->client->resp.context];
+			const bool live = arena.state == ASTATE_FIGHTING ||
+							  arena.state == ASTATE_RESULTS ||
+							  arena.state == ASTATE_NEXTROUND;
+
+			for (int32_t side = 0; side < 2; side++)
+			{
+				const player_stat_t stat = side ? STAT_RA2_QUEUE2 : STAT_RA2_QUEUE1;
+				team_t *team = arena.pickupteam[side];
+				qmenu_t *slot = team ? (qmenu_t *) team->arenalink.it : nullptr;
+
+				ent->client->ps.stats[stat] = (int16_t)
+					(slot ? (live ? count_players_queue(slot) : count_queue(slot)) : 0);
+			}
+
+			// the " Red"/"Blue" labels init_player unicasts once per client
+			ent->client->ps.stats[STAT_RA2_QUEUE1_NAME] = CONFIG_RA2_QUEUE1_NAME;
+			ent->client->ps.stats[STAT_RA2_QUEUE2_NAME] = CONFIG_RA2_QUEUE2_NAME;
+			ent->client->ps.stats[STAT_RA2_SHOWQUEUE] = 1;
+		}
+		else
+		{
+			ent->client->ps.stats[STAT_RA2_SHOWQUEUE] = 0;
+		}
+
+		RA2_SetIDView(ent);
+	}
+	else
+	{
+		// ZOID
+		SetCTFStats(ent);
+		// ZOID
+	}
 }
 
 /*
@@ -1121,7 +1588,14 @@ void G_SetSpectatorStats(edict_t *ent)
 
 	// layouts are independant in spectator
 	cl->ps.stats[STAT_LAYOUTS] = 0;
-	if (cl->pers.health <= 0 || level.intermissiontime || cl->showscores)
+	// reachable under RA2: RA2 forces deathmatch and excludes ctf/teamplay, so
+	// ClientUserinfoChanged honours a userinfo "spectator 1", spectator_respawn
+	// sets resp.spectator, and PutClientInServer's RA2 arm returns before the
+	// line that would clear it again. Without this arm such a client would have
+	// its layout bit rebuilt the stock way and lose escape all over again.
+	if (ra2->integer)
+		cl->ps.stats[STAT_LAYOUTS] |= RA2_LayoutFlag(ent);
+	else if (cl->pers.health <= 0 || level.intermissiontime || cl->showscores)
 		cl->ps.stats[STAT_LAYOUTS] |= LAYOUTS_LAYOUT;
 	if (cl->showinventory && cl->pers.health > 0)
 		cl->ps.stats[STAT_LAYOUTS] |= LAYOUTS_INVENTORY;

@@ -2425,16 +2425,19 @@ void G_PrecacheInventoryItems();
 // not store or modify it.
 void ReadGameJson(const char *jsonString)
 {
+	uint32_t max_entities = game.maxentities;
+	uint32_t max_clients = game.maxclients;
+
+	G_DestroyClientStorage(game.clients, game.maxclients);
+	game.clients = nullptr;
 	gi.FreeTags(TAG_GAME);
 
 	Json::Value json = parseJson(jsonString);
 
-	uint32_t max_entities = game.maxentities;
-	uint32_t max_clients = game.maxclients;
-	
 	game = {};
 	g_edicts = (edict_t *) gi.TagMalloc(max_entities * sizeof(g_edicts[0]), TAG_GAME);
 	game.clients = (gclient_t *) gi.TagMalloc(max_clients * sizeof(game.clients[0]), TAG_GAME);
+	G_ConstructClientStorage(game.clients, max_clients);
 	globals.edicts = g_edicts;
 
 	// read game

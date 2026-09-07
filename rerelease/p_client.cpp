@@ -3,8 +3,12 @@
 #include "g_local.h"
 #include "m_player.h"
 #include "bots/bot_includes.h"
+#include "rocketarena2/arena.h"
+
+#include <new> // placement new -- see the menutext reconstruction in PutClientInServer
 
 void SP_misc_teleporter_dest(edict_t *ent);
+void ClientDisconnect(edict_t *ent);
 
 THINK(info_player_start_drop) (edict_t *self) -> void
 {
@@ -98,6 +102,144 @@ bool P_UseCoopInstancedItems()
 
 void ClientObituary(edict_t *self, edict_t *inflictor, edict_t *attacker, mod_t mod)
 {
+	if (ra2->integer)
+	{
+		auto arena_health = [self, attacker]() -> int32_t
+		{
+			const edict_t *who = (attacker && attacker->client) ? attacker : self;
+			int32_t health = arenas[who->client->resp.context].settings.health;
+			return health ? health : 100;
+		};
+		auto score_by_damage = [self, attacker]() -> bool
+		{
+			const edict_t *who = (attacker && attacker->client) ? attacker : self;
+			return arenas[who->client->resp.context].settings.scorebydamage;
+		};
+		auto attacker_weapon = [attacker]() -> item_id_t
+		{
+			return (attacker && attacker->client && attacker->client->pers.weapon) ? attacker->client->pers.weapon->id : IT_NULL;
+		};
+		auto inflictor_is_model = [inflictor](const char *model) -> bool
+		{
+			return inflictor && inflictor->s.modelindex == gi.modelindex(model);
+		};
+
+		// self->enemy is NOT set to the attacker yet: the suicide branch below
+		// reads back whoever last hurt this player (T_Damage keeps it, see
+		// g_combat.cpp) to pick its announcer line. The original assigns it
+		// only on the way into the kill path, past that branch.
+		if (attacker == self)
+		{
+			if (inflictor_is_model("models/objects/grenade/tris.md2") ||
+				inflictor_is_model("models/objects/grenade2/tris.md2"))
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} tries to put the pin back in\n", self->client->pers.netname);
+			else if (inflictor_is_model("models/objects/rocket/tris.md2"))
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} checks the safety\n", self->client->pers.netname);
+			else if (inflictor_is_model("sprites/s_bfg1.sp2"))
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} goes boom\n", self->client->pers.netname);
+			else
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} killed self.\n", self->client->pers.netname);
+
+			if (self->enemy && self->enemy->inuse && self->enemy->client && self->enemy->takedamage)
+			{
+				if (self->enemy->health >= arena_health())
+					send_sound_to_arena("ra/outstand.wav", attacker->client->resp.context);
+				else if (self->enemy->health >= (arena_health() - 20))
+					send_sound_to_arena("ra/welldone.wav", attacker->client->resp.context);
+				else if (self->health < -40)
+					send_sound_to_arena("ra/animality.wav", attacker->client->resp.context);
+			}
+
+			if (!score_by_damage())
+				self->client->resp.score--;
+
+			self->enemy = nullptr;
+			return;
+		}
+
+		self->enemy = attacker;
+
+		if (!attacker || !attacker->client)
+		{
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} died.\n", self->client->pers.netname);
+			if (!score_by_damage())
+				self->client->resp.score--;
+			return;
+		}
+
+		if (attacker->health >= arena_health())
+		{
+			if (self->health < -40)
+				send_sound_to_arena("ra/fatality.wav", attacker->client->resp.context);
+			else
+				send_sound_to_arena("ra/flawless.wav", attacker->client->resp.context);
+		}
+		else if (attacker->health >= (arena_health() - 20))
+		{
+			send_sound_to_arena("ra/excelent.wav", attacker->client->resp.context);
+		}
+
+		if (inflictor_is_model("models/objects/grenade/tris.md2") ||
+			inflictor_is_model("models/objects/grenade2/tris.md2"))
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} takes {}'s pill\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (inflictor_is_model("models/objects/rocket/tris.md2"))
+		{
+			if (self->health < -40)
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was splattered by {}'s rocket\n",
+					self->client->pers.netname, attacker->client->pers.netname);
+			else
+				gi.LocBroadcast_Print(PRINT_MEDIUM, "{} trips over {}'s rocket\n",
+					self->client->pers.netname, attacker->client->pers.netname);
+		}
+		else if (inflictor_is_model("models/objects/laser/tris.md2"))
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was blasted by {}\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (inflictor_is_model("sprites/s_bfg1.sp2"))
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was incinerated {}'s BFG\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_SHOTGUN)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} takes {}'s lead\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_SSHOTGUN)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} munches on {}'s buckshot\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_MACHINEGUN)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was perforated by {}\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_CHAINGUN)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was shredded by {}\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_RAILGUN)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} rides {}'s rail\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else if (attacker_weapon() == IT_WEAPON_GRAPPLE)
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was caught by {}'s grapple\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+		else
+			gi.LocBroadcast_Print(PRINT_MEDIUM, "{} was killed by {}\n",
+				self->client->pers.netname, attacker->client->pers.netname);
+
+		if (OnSameTeam(attacker, self))
+		{
+			if (!score_by_damage())
+				attacker->client->resp.score--;
+			// RA2 stuffed this at the victim as a "say", so the jab appeared to
+			// come out of their own mouth. The rerelease client does not act on
+			// stuffed console text, and under KEX_Q2_GAME chat never reaches
+			// the game DLL at all (see Cmd_Say_f), so it is broadcast from here
+			// in the "name: text" shape a chat line has.
+			gi.LocBroadcast_Print(PRINT_CHAT, "{}: As long as you're helping them, just shoot yourself!\n",
+				self->client->pers.netname);
+		}
+		else if (!score_by_damage())
+		{
+			attacker->client->resp.score++;
+		}
+
+		return;
+	}
+
 	const char *base = nullptr;
 
 	if (coop->integer && attacker->client)
@@ -556,6 +698,12 @@ DIE(player_die) (edict_t *self, edict_t *inflictor, edict_t *attacker, int damag
 	//	self->solid = SOLID_NOT;
 	self->svflags |= SVF_DEADMONSTER;
 
+	if (ra2->integer)
+	{
+		self->client->grenade_time = 0_ms;
+		self->client->resp.spawn_recheck = 0_ms;
+	}
+
 	if (!self->deadflag)
 	{
 		self->client->respawn_time = ( level.time + 1_sec );
@@ -567,14 +715,22 @@ DIE(player_die) (edict_t *self, edict_t *inflictor, edict_t *attacker, int damag
 		self->client->ps.pmove.pm_type = PM_DEAD;
 		ClientObituary(self, inflictor, attacker, mod);
 
-		CTFFragBonuses(self, inflictor, attacker);
-		// ZOID
-		TossClientWeapon(self);
-		// ZOID
-		CTFPlayerResetGrapple(self);
-		CTFDeadDropFlag(self);
-		CTFDeadDropTech(self);
-		// ZOID
+		if (ra2->integer)
+		{
+			GSLogDeath(self, inflictor, attacker);
+			CTFPlayerResetGrapple(self);
+		}
+		else
+		{
+			CTFFragBonuses(self, inflictor, attacker);
+			// ZOID
+			TossClientWeapon(self);
+			// ZOID
+			CTFPlayerResetGrapple(self);
+			CTFDeadDropFlag(self);
+			CTFDeadDropTech(self);
+			// ZOID
+		}
 		if (deathmatch->integer && !self->client->showscores)
 			Cmd_Help_f(self); // show scores
 
@@ -809,6 +965,7 @@ void InitClientPersistant(edict_t *ent, gclient_t *client)
 	// backup & restore userinfo
 	char userinfo[MAX_INFO_STRING];
 	Q_strlcpy(userinfo, client->pers.userinfo, sizeof(userinfo));
+	bool showmotd = client->pers.showmotd;
 
 	memset(&client->pers, 0, sizeof(client->pers));
 	ClientUserinfoChanged(ent, userinfo);
@@ -904,6 +1061,9 @@ void InitClientPersistant(edict_t *ent, gclient_t *client)
 	if (ent->client->pers.autoshield >= AUTO_SHIELD_AUTO)
 		ent->flags |= FL_WANTS_POWER_ARMOR;
 
+	if (ra2->integer)
+		client->pers.showmotd = showmotd;
+
 	client->pers.connected = true;
 	client->pers.spawned = true;
 }
@@ -921,6 +1081,17 @@ void InitClientResp(gclient_t *client)
 	client->resp.ctf_team = ctf_team;
 	client->resp.id_state = id_state;
 	// ZOID
+
+	if (ra2->integer)
+	{
+		client->resp.teamnum = -1;
+		client->resp.fightstate = FIGHT_SPECTATING;
+		client->resp.context = 0;
+		client->resp.omode = OBSERVER_NORMAL;
+		client->resp.votes = votetries_setting;
+		client->resp.entered = true;
+		client->resp.damagedealt = 0;
+	}
 
 	client->resp.entertime = level.time;
 	client->resp.coop_respawn = client->pers;
@@ -1439,7 +1610,30 @@ bool SelectSpawnPoint(edict_t *ent, vec3_t &origin, vec3_t &angles, bool force_s
 	// DM spots are simple
 	if (deathmatch->integer)
 	{
-		if (G_TeamplayEnabled())
+		if (ra2->integer)
+		{
+			int32_t context = ent->client ? ent->client->resp.context : 0;
+
+			if (ent->client && ent->client->resp.teamnum >= 0)
+			{
+				if (RA2_IsPlayableArena(context) && arenas[context].idarena)
+				{
+					team_t *team = TEAM(&teams[ent->client->resp.teamnum]);
+					int32_t side = team ? ((team->side != arenas[context].sidepick) + 1) : 0;
+					spot = SelectRandomArenaSpawnPoint("info_player_deathmatch", context, side);
+				}
+
+				if (!spot)
+					spot = SelectFarthestArenaSpawnPoint("info_player_deathmatch", context, ent);
+			}
+			else
+			{
+				spot = SelectFarthestArenaSpawnPoint("misc_teleporter_dest", context, ent);
+				if (!spot)
+					spot = SelectFarthestArenaSpawnPoint("info_player_deathmatch", context, ent);
+			}
+		}
+		else if (G_TeamplayEnabled())
 			spot = SelectCTFSpawnPoint(ent, force_spawn);
 		else
 		{
@@ -2128,9 +2322,18 @@ void PutClientInServer(edict_t *ent)
 			memset(&resp, 0, sizeof(resp));
 	}
 
+	// RA2 -- the menu queue head and the two pointers into it live in the part
+	// of gclient_t the memset below wipes, so tear the menus down first;
+	// otherwise every respawn orphans one TAG_LEVEL block per menu, per item
+	// node, per menuitem_t and per title for the rest of the map. This is the
+	// original's own close_menus() call, in the original's own place.
+	if (ra2->integer)
+		clear_menus(ent);
+
 	// clear everything but the persistant data
 	saved = client->pers;
-	memset(client, 0, sizeof(*client));
+	G_DestroyClientStorage(client, 1);
+	G_ConstructClientStorage(client, 1);
 	client->pers = saved;
 	client->resp = resp;
 
@@ -2207,6 +2410,28 @@ void PutClientInServer(edict_t *ent)
 	P_AssignClientSkinnum(ent);
 
 	ent->s.frame = 0;
+
+	if (ra2->integer && deathmatch->integer)
+	{
+		ent->takedamage = false;
+		ent->client->menuusetime = 0_ms;
+		gi.linkentity(ent);
+
+		client->newweapon = client->pers.weapon;
+		ChangeWeapon(ent);
+
+		ent->client->resp.spawn_recheck = 0_ms;
+
+		if (ent->client->resp.teamnum >= 0)
+			reinit_player(ent);
+		else
+			init_player(ent);
+
+		int32_t context = ent->client->resp.context;
+		ent->client->resp.context = 0;
+		move_to_arena(ent, context, 1);
+		return;
+	}
 
 	PutClientOnSpawnPoint(ent, spawn_origin, spawn_angles);
 
@@ -2329,6 +2554,29 @@ void ClientBeginDeathmatch(edict_t *ent)
 		DMGame.ClientBegin(ent);
 	}
 	// PGM
+
+	if (ra2->integer)
+	{
+		// RA2 handed every client the aliases that turn a +hook/+grap bind into
+		// its grap_on/grap_off client commands. Two halves of that stopped
+		// working in the rerelease: the client does not act on stuffed console
+		// text, and it no longer forwards an unknown command to the server, so
+		// grap_on has to be spelled "cmd grap_on". They are still sent, for any
+		// client that does run them, one command per message so that a client
+		// which only runs a message's first line cannot end up holding the
+		// press half without the release half. The hook's real path here is
+		// BUTTON_USE -- see Think_Weapon in p_weapon.cpp.
+		stuffcmd(ent, "alias +grap \"cmd grap_on\"\n");
+		stuffcmd(ent, "alias -grap \"cmd grap_off\"\n");
+		stuffcmd(ent, "alias +hook \"cmd grap_on\"\n");
+		stuffcmd(ent, "alias -hook \"cmd grap_off\"\n");
+	}
+
+	if (ra2->integer && level.intermissiontime)
+	{
+		MoveClientToIntermission(ent);
+		return;
+	}
 
 	// locate ent at a spawn point
 	PutClientInServer(ent);
@@ -2575,13 +2823,16 @@ called whenever the player updates a userinfo variable.
 */
 void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 {
+	char local_userinfo[MAX_INFO_STRING];
+	Q_strlcpy(local_userinfo, userinfo, sizeof(local_userinfo));
+
 	// set name
-	if (!gi.Info_ValueForKey(userinfo, "name", ent->client->pers.netname, sizeof(ent->client->pers.netname)))
+	if (!gi.Info_ValueForKey(local_userinfo, "name", ent->client->pers.netname, sizeof(ent->client->pers.netname)))
 		Q_strlcpy(ent->client->pers.netname, "badinfo", sizeof(ent->client->pers.netname));
 
 	// set spectator
 	char val[MAX_INFO_VALUE] = { 0 };
-	gi.Info_ValueForKey(userinfo, "spectator", val, sizeof(val));
+	gi.Info_ValueForKey(local_userinfo, "spectator", val, sizeof(val));
 
 	// spectators are only supported in deathmatch
 	if (deathmatch->integer && !G_TeamplayEnabled() && *val && strcmp(val, "0"))
@@ -2590,29 +2841,66 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 		ent->client->pers.spectator = false;
 
 	// set skin
-	if (!gi.Info_ValueForKey(userinfo, "skin", val, sizeof(val)))
+	if (!gi.Info_ValueForKey(local_userinfo, "skin", val, sizeof(val)))
 		Q_strlcpy(val, "male/grunt", sizeof(val));
 
 	int playernum = ent - g_edicts - 1;
 
-	// combine name and skin into a configstring
-	// ZOID
-	if (G_TeamplayEnabled())
-		CTFAssignSkin(ent, val);
+	if (ra2->integer)
+	{
+		if (!strstr(val, "/nullxxx"))
+		{
+			team_t *team = (ent->client->resp.teamnum >= 0) ? TEAM(&teams[ent->client->resp.teamnum]) : nullptr;
+			if (team && team->skin != -1)
+				setteamskin(ent, local_userinfo, team->skin);
+			else
+				gi.configstring(CS_PLAYERSKINS + playernum, G_Fmt("{}\\{}", ent->client->pers.netname, val).data());
+		}
+		else
+		{
+			// nothing in the mod asks a client for this skin any more --
+			// setteamskin() used to stuff it, which the rerelease client
+			// ignores -- so this branch is now only reached by a player who
+			// sets the sentinel skin themselves. Kept because it is still the
+			// right answer for that: restore what they had and re-force the
+			// team colour over it.
+			char old_skin[MAX_INFO_VALUE] = { 0 };
+			gi.Info_ValueForKey(ent->client->pers.userinfo, "skin", old_skin, sizeof(old_skin));
+			gi.Info_RemoveKey(local_userinfo, "skin");
+
+			team_t *team = (ent->client->resp.teamnum >= 0) ? TEAM(&teams[ent->client->resp.teamnum]) : nullptr;
+			if (!team || team->skin == -1)
+			{
+				Q_strlcpy(old_skin, "male/grunt", sizeof(old_skin));
+				gi.configstring(CS_PLAYERSKINS + playernum, G_Fmt("{}\\{}", ent->client->pers.netname, old_skin).data());
+			}
+
+			gi.Info_SetValueForKey(local_userinfo, "skin", old_skin);
+		}
+
+		gi.Info_ValueForKey(local_userinfo, "skin", val, sizeof(val));
+	}
 	else
 	{
-		// set dogtag
-		char dogtag[MAX_INFO_VALUE] = { 0 };
-		gi.Info_ValueForKey(userinfo, "dogtag", dogtag, sizeof(dogtag));
+		// combine name and skin into a configstring
+		// ZOID
+		if (G_TeamplayEnabled())
+			CTFAssignSkin(ent, val);
+		else
+		{
+			// set dogtag
+			char dogtag[MAX_INFO_VALUE] = { 0 };
+			gi.Info_ValueForKey(local_userinfo, "dogtag", dogtag, sizeof(dogtag));
+
+			// ZOID
+			gi.configstring(CS_PLAYERSKINS + playernum, G_Fmt("{}\\{}\\{}", ent->client->pers.netname, val, dogtag).data());
+		}
 
 		// ZOID
-		gi.configstring(CS_PLAYERSKINS + playernum, G_Fmt("{}\\{}\\{}", ent->client->pers.netname, val, dogtag).data());
+		//  set player name field (used in id_state view)
+		gi.configstring(CONFIG_CTF_PLAYER_NAME + playernum, ent->client->pers.netname);
+		// ZOID
 	}
-
-	// ZOID
-	//  set player name field (used in id_state view)
-	gi.configstring(CONFIG_CTF_PLAYER_NAME + playernum, ent->client->pers.netname);
-	// ZOID
 
 	// [Kex] netname is used for a couple of other things, so we update this after those.
 	if ( ( ent->svflags & SVF_BOT ) == 0 ) {
@@ -2620,11 +2908,11 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 	}
 
 	// fov
-	gi.Info_ValueForKey(userinfo, "fov", val, sizeof(val));
+	gi.Info_ValueForKey(local_userinfo, "fov", val, sizeof(val));
 	ent->client->ps.fov = clamp((float) atoi(val), 1.f, 160.f);
 
 	// handedness
-	if (gi.Info_ValueForKey(userinfo, "hand", val, sizeof(val)))
+	if (gi.Info_ValueForKey(local_userinfo, "hand", val, sizeof(val)))
 	{
 		ent->client->pers.hand = static_cast<handedness_t>(clamp(atoi(val), (int32_t) RIGHT_HANDED, (int32_t) CENTER_HANDED));
 	}
@@ -2634,7 +2922,7 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 	}
 
 	// [Paril-KEX] auto-switch
-	if (gi.Info_ValueForKey(userinfo, "autoswitch", val, sizeof(val)))
+	if (gi.Info_ValueForKey(local_userinfo, "autoswitch", val, sizeof(val)))
 	{
 		ent->client->pers.autoswitch = static_cast<auto_switch_t>(clamp(atoi(val), (int32_t)auto_switch_t::SMART, (int32_t)auto_switch_t::NEVER));
 	}
@@ -2643,7 +2931,7 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 		ent->client->pers.autoswitch = auto_switch_t::SMART;
 	}
 
-	if (gi.Info_ValueForKey(userinfo, "autoshield", val, sizeof(val)))
+	if (gi.Info_ValueForKey(local_userinfo, "autoshield", val, sizeof(val)))
 	{
 		ent->client->pers.autoshield = atoi(val);
 	}
@@ -2653,7 +2941,7 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 	}
 
 	// [Paril-KEX] wants bob
-	if (gi.Info_ValueForKey(userinfo, "bobskip", val, sizeof(val)))
+	if (gi.Info_ValueForKey(local_userinfo, "bobskip", val, sizeof(val)))
 	{
 		ent->client->pers.bob_skip = val[0] == '1';
 	}
@@ -2663,7 +2951,7 @@ void ClientUserinfoChanged(edict_t *ent, const char *userinfo)
 	}
 
 	// save off the userinfo in case we want to check something later
-	Q_strlcpy(ent->client->pers.userinfo, userinfo, sizeof(ent->client->pers.userinfo));
+	Q_strlcpy(ent->client->pers.userinfo, local_userinfo, sizeof(ent->client->pers.userinfo));
 }
 
 inline bool IsSlotIgnored(edict_t *slot, edict_t **ignore, size_t num_ignore)
@@ -2828,6 +3116,14 @@ loadgames will.
 */
 bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isBot)
 {
+	ent->client = game.clients + (ent - g_edicts - 1);
+
+	if (ra2->integer && ent->client->resp.entered)
+	{
+		gi.Com_PrintFmt("{}: reconnect without disconnect\n", ent->client->pers.netname);
+		ClientDisconnect(ent);
+	}
+
 	// check to see if they are on the banned IP list
 #if 0
 	value = Info_ValueForKey(userinfo, "ip");
@@ -2842,7 +3138,12 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 	char value[MAX_INFO_VALUE] = { 0 };
 	gi.Info_ValueForKey(userinfo, "spectator", value, sizeof(value));
 
-	if (deathmatch->integer && *value && strcmp(value, "0"))
+	if (ra2->integer && deathmatch->integer && *value && strcmp(value, "0"))
+	{
+		gi.Info_SetValueForKey(userinfo, "rejmsg", "id Spectator Mode not Supported");
+		return false;
+	}
+	else if (deathmatch->integer && *value && strcmp(value, "0"))
 	{
 		uint32_t i, numspec;
 
@@ -2877,9 +3178,6 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 		}
 	}
 
-	// they can connect
-	ent->client = game.clients + (ent - g_edicts - 1);
-
 	// set up userinfo early
 	ClientUserinfoChanged(ent, userinfo);
 
@@ -2893,8 +3191,13 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 		ent->client->resp.id_state = true;
 		// ZOID
 		InitClientResp(ent->client);
-		if (!game.autosaved || !ent->client->pers.weapon)
+		if (ra2->integer)
 			InitClientPersistant(ent, ent->client);
+		else if (!game.autosaved || !ent->client->pers.weapon)
+			InitClientPersistant(ent, ent->client);
+
+		if (ra2->integer)
+			ent->client->pers.showmotd = true;
 	}
 
 	// make sure we start with known default(s)
@@ -2905,7 +3208,14 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 
 	Q_strlcpy(ent->client->pers.social_id, social_id, sizeof(ent->client->pers.social_id));
 
-	if (game.maxclients > 1)
+	if (ra2->integer)
+	{
+		GSLogEnter(ent);
+		gi.Info_ValueForKey(userinfo, "ip", value, sizeof(value));
+		if (game.maxclients > 1)
+			gi.Com_PrintFmt("{} connected from {}\n", ent->client->pers.netname, value);
+	}
+	else if (game.maxclients > 1)
 	{
 		// [Paril-KEX] fetch name because now netname is kinda unsuitable
 		gi.Info_ValueForKey(userinfo, "name", value, sizeof(value));
@@ -2931,6 +3241,12 @@ void ClientDisconnect(edict_t *ent)
 {
 	if (!ent->client)
 		return;
+
+	if (ra2->integer)
+	{
+		GSLogExit(ent);
+		gi.LocBroadcast_Print(PRINT_HIGH, "{} disconnected\n", ent->client->pers.netname);
+	}
 
 	// ZOID
 	CTFDeadDropFlag(ent);
@@ -2972,6 +3288,12 @@ void ClientDisconnect(edict_t *ent)
 	gi.unlinkentity(ent);
 	ent->s.modelindex = 0;
 	ent->solid = SOLID_NOT;
+	if (ra2->integer)
+	{
+		remove_from_team(ent);
+		ent->client->resp.entered = false;
+		gi.configstring(CS_PLAYERSKINS + (ent - g_edicts - 1), "");
+	}
 	ent->inuse = false;
 	ent->sv.init = false;
 	ent->classname = "disconnected";
@@ -3025,6 +3347,13 @@ void P_FallingDamage(edict_t *ent, const pmove_t &pm)
 
 	// dead stuff can't crater
 	if (ent->health <= 0 || ent->deadflag)
+		return;
+
+	// RA2 -- and neither does the audience. An observer in OBSERVER_NORMAL is
+	// still MOVETYPE_WALK/SOLID_BBOX, so it would otherwise land with a thump
+	// and a fall-kick like a fighter (the other observer modes noclip and are
+	// caught by the MOVETYPE_NOCLIP test below).
+	if (ra2->integer && ent->client->resp.fightstate != FIGHT_ALIVE)
 		return;
 
 	if (ent->s.modelindex != MODELINDEX_PLAYER)
@@ -3092,7 +3421,14 @@ void P_FallingDamage(edict_t *ent, const pmove_t &pm)
 			damage = 1;
 		dir = { 0, 0, 1 };
 
-		if (!deathmatch->integer || !g_dm_no_fall_damage->integer)
+		// RA2 -- each arena decides whether falling hurts (arena.cfg
+		// "fallingdamage", and the settings/propose menus' "Falling Damage"
+		// row). Without this the setting was parsed, defaulted, votable and
+		// displayed but had no effect at all.
+		const bool ra2_falling = !ra2->integer ||
+			arenas[ent->client->resp.context].settings.fallingdamage;
+
+		if (ra2_falling && (!deathmatch->integer || !g_dm_no_fall_damage->integer))
 			T_Damage(ent, world, world, dir, ent->s.origin, vec3_origin, damage, 0, DAMAGE_NONE, MOD_FALLING);
 	}
 	else
@@ -3219,6 +3555,8 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 			}
 			else if (ent->client->awaiting_respawn)
 				client->ps.pmove.pm_type = PM_FREEZE;
+			else if (ra2->integer && ent->client->resp.fightstate == FIGHT_SPECTATING)
+				client->ps.pmove.pm_type = PM_SPECTATOR;
 			else if (ent->client->resp.spectator || (G_TeamplayEnabled() && ent->client->resp.ctf_team == CTF_NOTEAM))
 				client->ps.pmove.pm_type = PM_SPECTATOR;
 			else
@@ -3243,6 +3581,20 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 
 		// PGM	trigger_gravity support
 		client->ps.pmove.gravity = (short) (level.gravity * ent->gravity);
+
+		if (ra2->integer)
+		{
+			if (ent->client->resp.track_target && ent->client->resp.fightstate == FIGHT_SPECTATING)
+			{
+				client->ps.pmove.pm_type = PM_SPECTATOR;
+				client->ps.pmove.gravity = 0;
+
+				if (ent->client->resp.omode == OBSERVER_TRACKCAM)
+					track_think(ent, ucmd);
+				else if (ent->client->resp.omode == OBSERVER_EYECAM)
+					eyecam_think(ent, ucmd);
+			}
+		}
 		pm.s = client->ps.pmove;
 
 		pm.s.origin = ent->s.origin;
@@ -3313,7 +3665,8 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 		if (!ent->client->menu)
 			client->resp.cmd_angles = ucmd->angles;
 
-		if (pm.jump_sound && !(pm.s.pm_flags & PMF_ON_LADDER))
+		if (pm.jump_sound && !(pm.s.pm_flags & PMF_ON_LADDER) &&
+			(!ra2->integer || ent->client->resp.fightstate == FIGHT_ALIVE))
 		{
 			gi.sound(ent, CHAN_VOICE, gi.soundindex("*jump1.wav"), 1, ATTN_NORM, 0);
 			// Paril: removed to make ambushes more effective and to
@@ -3375,10 +3728,51 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 		}
 	}
 
+	if (ra2->integer)
+	{
+		int32_t observer_move = (ucmd->buttons & BUTTON_JUMP ? 1 : 0) - (ucmd->buttons & BUTTON_CROUCH ? 1 : 0);
+
+		if (!(client->latched_buttons & BUTTON_ATTACK))
+			client->resp.omode_buttons &= ~1;
+		else if (client->resp.fightstate == FIGHT_SPECTATING &&
+			client->resp.context != 0 &&
+			!(client->resp.omode_buttons & 1) &&
+			// +attack cycles the observer camera, and a queued bot holds it
+			// down: it would spend every round it waits out flipping between
+			// trackcam and eyecam instead of watching the arena.
+			!RA2_IsBot(ent))
+		{
+			ChangeOMode(ent);
+			client->resp.omode_buttons |= 1;
+		}
+
+		if (observer_move == 0)
+			client->resp.omode_buttons &= ~2;
+
+		if (client->resp.fightstate == FIGHT_SPECTATING &&
+			(client->resp.omode == OBSERVER_TRACKCAM || client->resp.omode == OBSERVER_EYECAM) &&
+			observer_move != 0)
+		{
+			if (!(client->resp.omode_buttons & 2))
+			{
+				if (observer_move > 0)
+					track_next(ent);
+				else
+					track_prev(ent);
+				client->resp.omode_buttons |= 2;
+			}
+		}
+		else if (observer_move < 0 && client->resp.context == 1 && ent->s.origin[2] >= 388 &&
+			!Q_strcasecmp(level.mapname, "ra2map13"))
+		{
+			T_Damage(ent, ent, ent, vec3_origin, ent->s.origin, vec3_origin, 100000, 0, DAMAGE_NO_PROTECTION, MOD_TELEFRAG);
+		}
+	}
+
 	// fire weapon from final position if needed
 	if (client->latched_buttons & BUTTON_ATTACK)
 	{
-		if (client->resp.spectator)
+		if (!ra2->integer && client->resp.spectator)
 		{
 			client->latched_buttons = BUTTON_NONE;
 
@@ -3392,22 +3786,30 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 		}
 		else if (!ent->client->weapon_thunk)
 		{
-			// we can only do this during a ready state and
-			// if enough time has passed from last fire
-			if (ent->client->weaponstate == WEAPON_READY)
+			if (ra2->integer)
 			{
-				ent->client->weapon_fire_buffered = true;
-
-				if (ent->client->weapon_fire_finished <= level.time)
+				ent->client->weapon_thunk = true;
+				Think_Weapon(ent);
+			}
+			else
+			{
+				// we can only do this during a ready state and
+				// if enough time has passed from last fire
+				if (ent->client->weaponstate == WEAPON_READY)
 				{
-					ent->client->weapon_thunk = true;
-					Think_Weapon(ent);
+					ent->client->weapon_fire_buffered = true;
+
+					if (ent->client->weapon_fire_finished <= level.time)
+					{
+						ent->client->weapon_thunk = true;
+						Think_Weapon(ent);
+					}
 				}
 			}
 		}
 	}
 
-	if (client->resp.spectator)
+	if (!ra2->integer && client->resp.spectator)
 	{
 		if (!HandleMenuMovement(ent, ucmd))
 		{
@@ -3801,6 +4203,13 @@ void ClientBeginServerFrame(edict_t *ent)
 		// don't respawn if level is waiting to restart
 		if (level.time > client->respawn_time && !level.coop_level_restart_time)
 		{
+			if (ra2->integer)
+			{
+				respawn(ent);
+				client->latched_buttons = BUTTON_NONE;
+				return;
+			}
+
 			// check for coop handling
 			if (!G_CoopRespawn(ent))
 			{
